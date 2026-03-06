@@ -3,13 +3,14 @@ package cn.inlook.cex.domain.service;
 import cn.inlook.cex.domain.model.Order;
 import cn.inlook.cex.domain.model.OrderBook;
 import cn.inlook.cex.domain.model.OrderSide;
+import cn.inlook.cex.infrastructure.mq.MockKafkaBroker; // [ZH] 引入模拟 Kafka / [EN] Import mock Kafka
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.LinkedList;
 
 /**
- * [ZH] 核心撮合引擎 - 增加账务结算联动
- * [EN] Core Matching Engine - Integrated with Balance Settlement
+ * [ZH] 核心撮合引擎 - 增加账务结算联动与异步广播
+ * [EN] Core Matching Engine - Integrated with Balance Settlement & Async Broadcast
  */
 @Slf4j
 public class MatchingEngine {
@@ -66,7 +67,15 @@ public class MatchingEngine {
 
                 balanceManager.settle(buyerId, sellerId, baseCurrency, quoteCurrency, tradedAmount, bestPrice);
 
-                // 3. [ZH] 日志记录（生产环境应使用异步 Logger） / [EN] Logging (use async logger in production)
+                // 3. [ZH] 🚀 架构核心：结算成功后，异步广播成交结果！(绝不能在这里同步写库)
+                //    [EN] 🚀 Core Arch: Async broadcast after settlement! (NEVER sync write to DB here)
+                String tradeRecord = String.format(
+                        "{\"buyerUid\": %d, \"sellerUid\": %d, \"price\": %d, \"amount\": %d}",
+                        buyerId, sellerId, bestPrice, tradedAmount
+                );
+                MockKafkaBroker.send(tradeRecord); // [ZH] 极速发送并返回 / [EN] Fire and forget
+
+                // 4. [ZH] 日志记录（生产环境应使用异步 Logger） / [EN] Logging (use async logger in production)
                 log.info("TRADE: {} matched with {}, Amount: {}, Price: {}",
                         taker.getOrderId(), maker.getOrderId(), tradedAmount, bestPrice);
 

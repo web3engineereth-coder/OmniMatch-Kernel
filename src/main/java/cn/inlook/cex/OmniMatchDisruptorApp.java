@@ -4,26 +4,31 @@ import cn.inlook.cex.domain.model.Order;
 import cn.inlook.cex.domain.model.OrderSide;
 import cn.inlook.cex.domain.service.BalanceManager;
 import cn.inlook.cex.domain.service.MatchingEngine;
+import cn.inlook.cex.infrastructure.disruptor.JournalEventHandler;
 import cn.inlook.cex.infrastructure.disruptor.MatchingEventHandler;
 import cn.inlook.cex.infrastructure.disruptor.OrderEvent;
+import cn.inlook.cex.infrastructure.journal.DiskJournaler;
+import cn.inlook.cex.infrastructure.mq.MockKafkaBroker; // [ZH] 引入模拟 Kafka / [EN] Import mock Kafka
 import com.lmax.disruptor.RingBuffer;
 import com.lmax.disruptor.dsl.Disruptor;
 import com.lmax.disruptor.util.DaemonThreadFactory;
 import lombok.extern.slf4j.Slf4j;
 
-import java.nio.ByteBuffer;
-
-// [ZH] 高并发完整启动类
-// [EN] High-Concurrency Main App - Your GitHub showcase code
+// [ZH] 高并发完整启动类 (LMAX 金融级升级版)
+// [EN] High-Concurrency Main App (LMAX Financial Grade Upgraded) - Your GitHub showcase code
 @Slf4j
 public class OmniMatchDisruptorApp {
 
     public static void main(String[] args) throws InterruptedException {
-        log.info("Booting up OmniMatch-Kernel with LMAX Disruptor...");
+        log.info("Booting up OmniMatch-Kernel with LMAX Disruptor (Journaling + Async Mock Kafka)...");
 
-        // 1. [ZH] 初始化核心领域服务 / [EN] Initialize core domain services
+        // [ZH] 0. 启动模拟的下游 Kafka 消费者 / [EN] Start mock downstream Kafka consumer
+        MockKafkaBroker.startConsumers();
+
+        // 1. [ZH] 初始化核心领域服务与持久化组件 / [EN] Initialize core domain services and persistence
         BalanceManager balanceManager = new BalanceManager();
         MatchingEngine matchingEngine = new MatchingEngine(balanceManager);
+        DiskJournaler diskJournaler = new DiskJournaler("redo_log.bin");
 
         // [ZH] 注入初始资金 (演示用) / [EN] Inject initial funds (for demo)
         balanceManager.settle(100, 0, 1, 2, 0, 0); // User 100
@@ -40,9 +45,16 @@ public class OmniMatchDisruptorApp {
                 DaemonThreadFactory.INSTANCE
         );
 
-        // [ZH] 绑定消费者 (我们的撮合引擎)
-        // [EN] Bind the consumer (Our matching engine)
-        disruptor.handleEventsWith(new MatchingEventHandler(matchingEngine));
+        // [ZH] 实例化消费者处理器 / [EN] Instantiate consumer handlers
+        JournalEventHandler journalHandler = new JournalEventHandler(diskJournaler);
+        MatchingEventHandler matchingHandler = new MatchingEventHandler(matchingEngine);
+
+        // [ZH] 🚀 核心架构升级：绑定消费者 (构建串行依赖：先落盘，后撮合)
+        // [EN] 🚀 Core Upgrade: Bind consumers (Build serial dependency: Journal first, Match later)
+        disruptor
+                .handleEventsWith(journalHandler) // [ZH] 第一步：执行异步记账落盘 / [EN] Step 1: Async journal to disk
+                .then(matchingHandler);           // [ZH] 第二步：落盘成功后，触发内存撮合 / [EN] Step 2: Memory match after journaling
+
         disruptor.start();
 
         // 3. [ZH] 获取 RingBuffer (生产者发布事件的入口)
