@@ -19,6 +19,11 @@ public class MatchingEventHandler implements EventHandler<OrderEvent> {
     // [EN] Triggered every time there is a new order in the RingBuffer
     @Override
     public void onEvent(OrderEvent event, long sequence, boolean endOfBatch) throws Exception {
+        // [ZH] 🚀 打印当前执行撮合逻辑的物理线程名称，证明它是独立于记账和发单的！
+        // [EN] 🚀 Log the physical thread name executing the matching logic!
+        log.info("[Matcher] 当前撮合线程 / Current Match Thread: {} | Seq: {} | OrderID: {}",
+                Thread.currentThread().getName(), sequence, event.getOrder().getOrderId());
+
         try {
             // [ZH] 极速调用核心撮合逻辑
             // [EN] Execute core matching logic at extreme speed

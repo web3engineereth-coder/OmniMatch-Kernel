@@ -14,8 +14,12 @@ import com.lmax.disruptor.dsl.Disruptor;
 import com.lmax.disruptor.util.DaemonThreadFactory;
 import lombok.extern.slf4j.Slf4j;
 
-// [ZH] 高并发完整启动类 (LMAX 金融级升级版)
-// [EN] High-Concurrency Main App (LMAX Financial Grade Upgraded) - Your GitHub showcase code
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
+// [ZH] 高并发完整启动类 (LMAX 金融级升级版 - 多线程压测)
+// [EN] High-Concurrency Main App (LMAX Financial Grade Upgraded - Multi-Thread Test)
 @Slf4j
 public class OmniMatchDisruptorApp {
 
@@ -63,14 +67,25 @@ public class OmniMatchDisruptorApp {
 
         log.info("Engine is running. Simulating concurrent order placement...");
 
-        // 4. [ZH] 模拟高并发下单 / [EN] Simulate high-concurrency order placement
-        // [ZH] 沈老板 (UID 100) 发布买单
-        // [EN] Boss Shen (UID 100) publishes BUY order
-        publishOrder(ringBuffer, new Order(1001L, 100L, OrderSide.BUY, 50000L, 10000000L));
+        // 4. [ZH] 模拟高并发下单 (使用线程池模拟外部 Tomcat 并发)
+        // [EN] Simulate high-concurrency order placement (Using thread pool to mock Tomcat concurrency)
+        int concurrentThreads = 5; // [ZH] 模拟 5 个外部发单线程 / [EN] Simulate 5 external producer threads
+        ExecutorService executor = Executors.newFixedThreadPool(concurrentThreads);
 
-        // [ZH] 机器人 (UID 200) 发布卖单
-        // [EN] Robot (UID 200) publishes SELL order
-        publishOrder(ringBuffer, new Order(1002L, 200L, OrderSide.SELL, 50000L, 10000000L));
+        for (int i = 0; i < 10; i++) { // [ZH] 总共发送 10 笔订单进行测试 / [EN] Send 10 orders in total for testing
+            final long orderId = 1000L + i;
+            executor.submit(() -> {
+                // [ZH] 随机买卖方向 / [EN] Randomize order side for test variety
+                OrderSide side = (orderId % 2 == 0) ? OrderSide.BUY : OrderSide.SELL;
+                long uid = (side == OrderSide.BUY) ? 100L : 200L;
+
+                publishOrder(ringBuffer, new Order(orderId, uid, side, 50000L, 1000L));
+            });
+        }
+
+        // [ZH] 关闭线程池并等待任务完成 / [EN] Shutdown executor and wait for completion
+        executor.shutdown();
+        executor.awaitTermination(2, TimeUnit.SECONDS);
 
         // [ZH] 阻塞主线程一会，让后台消费者跑完
         // [EN] Block main thread slightly to let background consumer finish
@@ -84,6 +99,11 @@ public class OmniMatchDisruptorApp {
     private static void publishOrder(RingBuffer<OrderEvent> ringBuffer, Order order) {
         long sequence = ringBuffer.next();  // [ZH] 申请下一个坑位 / [EN] Claim next slot
         try {
+            // [ZH] 🚀 打印当前发单的物理线程名称，证明发单是多线程并发的！
+            // [EN] 🚀 Log the current producer thread name to prove concurrent publishing!
+            log.info("[Producer] 当前发单线程 / Current Producer Thread: {} | OrderID: {}",
+                    Thread.currentThread().getName(), order.getOrderId());
+
             OrderEvent event = ringBuffer.get(sequence); // [ZH] 获取该坑位的对象 / [EN] Get object at slot
             event.setOrder(order); // [ZH] 填充数据 / [EN] Fill data
         } finally {
