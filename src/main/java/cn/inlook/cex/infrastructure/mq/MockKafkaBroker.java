@@ -1,5 +1,6 @@
 package cn.inlook.cex.infrastructure.mq;
 
+import com.alibaba.fastjson2.JSON;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.File;
@@ -11,106 +12,110 @@ import java.nio.charset.StandardCharsets;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 
-// [ZH] 模拟 Kafka 真实落盘：基于 MappedByteBuffer 的 mmap 零拷贝 (Zero-Copy)
-// [EN] Simulate Kafka real persistence: mmap Zero-Copy based on MappedByteBuffer
+/**
+ * [ZH] 模拟高性能指令持久化引擎 (基于 mmap 零拷贝)
+ * [EN] Mock High-Performance Command Persistence Engine (Based on mmap Zero-Copy)
+ */
 @Slf4j
 public class MockKafkaBroker {
 
-    private static final BlockingQueue<String> TRADE_RESULT_TOPIC = new LinkedBlockingQueue<>();
+    // [ZH] 内部指令传输队列 / [EN] Internal command transport queue
+    private static final BlockingQueue<Object> COMMAND_TOPIC = new LinkedBlockingQueue<>();
 
     private static final String JOURNAL_FILE_PATH = "trade_journal_zerocopy.log";
 
-    // [ZH] 预分配的文件大小 (模拟 Kafka 的 Segment 文件，这里设为 10MB 用于测试)
-    // [EN] Pre-allocated file size (Mocking Kafka's Segment file, set to 10MB for testing)
-    private static final int SEGMENT_SIZE = 10 * 1024 * 1024;
+    // [ZH] 预分配 100MB 日志空间 / [EN] Pre-allocate 100MB journal space
+    private static final int SEGMENT_SIZE = 100 * 1024 * 1024;
 
     private static FileChannel fileChannel;
     private static MappedByteBuffer mappedByteBuffer;
-
-    // [ZH] 记录当前写入的位置
-    // [EN] Record the current write position
     private static int wrotePosition = 0;
 
     static {
         try {
             File file = new File(JOURNAL_FILE_PATH);
-
-            // [ZH] 必须使用 RandomAccessFile 以读写模式 "rw" 打开，才能进行内存映射
-            // [EN] Must use RandomAccessFile with "rw" mode to perform memory mapping
             RandomAccessFile raf = new RandomAccessFile(file, "rw");
             fileChannel = raf.getChannel();
 
-            // ==========================================
-            // [ZH] 🚀 零拷贝核心：mmap 内存映射
-            // [EN] 🚀 Zero-Copy Core: mmap memory mapping
-            // ==========================================
-            // [ZH] 将文件直接映射到虚拟内存中。对 mappedByteBuffer 的写入，就是直接写入 Page Cache
-            // [EN] Map the file directly into virtual memory. Writing to mappedByteBuffer is directly writing to Page Cache
+            // [ZH] 建立内存映射文件，实现零拷贝写入
+            // [EN] Establish memory-mapped file for zero-copy writing
             mappedByteBuffer = fileChannel.map(FileChannel.MapMode.READ_WRITE, 0, SEGMENT_SIZE);
 
-            log.info("[Mock Kafka Zero-Copy] mmap journal initialized at: {}, mapped size: {} bytes",
+            log.info("[Journal] Initialized mmap persistence at: {}, Size: {} bytes",
                     file.getAbsolutePath(), SEGMENT_SIZE);
 
         } catch (IOException e) {
-            log.error("[Mock Kafka Zero-Copy] Failed to initialize mmap.", e);
-            System.exit(1);
+            log.error("[Journal] Failed to initialize persistent storage: ", e);
+            throw new RuntimeException("Persistence initialization failed", e);
         }
     }
 
-    public static void send(String message) {
-        TRADE_RESULT_TOPIC.offer(message);
+    /**
+     * [ZH] 发送原始指令至持久化层
+     * [EN] Send raw command to persistence layer
+     * @param command [ZH] 指令载体 (PLACE_ORDER/CANCEL_ORDER) / [EN] Command carrier
+     */
+    public static void send(Object command) {
+        COMMAND_TOPIC.offer(command);
     }
 
+    /**
+     * [ZH] 启动持久化消费者线程
+     * [EN] Start persistence consumer thread
+     */
     public static void startConsumers() {
-        Thread consumerThread = new Thread(() -> {
-            log.info("[Mock Kafka Zero-Copy] Disk writer thread started, waiting for trade results...");
+        Thread writerThread = new Thread(() -> {
+            log.info("[Journal] Sequential write thread started.");
             try {
                 while (!Thread.currentThread().isInterrupted()) {
-                    String message = TRADE_RESULT_TOPIC.take();
+                    // [ZH] 阻塞获取指令数据 / [EN] Blocking take command data
+                    Object command = COMMAND_TOPIC.take();
 
-                    String logEntry = message + System.lineSeparator();
-                    byte[] bytes = logEntry.getBytes(StandardCharsets.UTF_8);
+                    // [ZH] 将指令序列化为 JSON 字符串并添加换行符
+                    // [EN] Serialize command to JSON string with newline
+                    String jsonLine = JSON.toJSONString(command) + System.lineSeparator();
+                    byte[] bytes = jsonLine.getBytes(StandardCharsets.UTF_8);
 
-                    // [ZH] 检查当前 Segment 是否写满 (生产环境中需要切分新的 Segment 文件)
-                    // [EN] Check if current Segment is full (Production requires rolling to a new Segment file)
                     if (wrotePosition + bytes.length > SEGMENT_SIZE) {
-                        log.warn("[Mock Kafka Zero-Copy] Segment full! In production, roll to a new file here.");
-                        // [ZH] 简单模拟：满了就不写了
-                        // [EN] Simple mock: Stop writing if full
-                        continue;
+                        log.error("[Journal] Segment space exhausted. System must halt to prevent data loss.");
+                        break;
                     }
 
-                    // ==========================================
-                    // [ZH] 极速落盘：没有系统调用 (No System Call)，没有用户态拷贝！
-                    // [EN] Ultra-fast persistence: No System Call, No User-Space copy!
-                    // ==========================================
+                    // [ZH] 执行零拷贝写入 / [EN] Execute zero-copy write
                     mappedByteBuffer.position(wrotePosition);
                     mappedByteBuffer.put(bytes);
                     wrotePosition += bytes.length;
 
-                    // [ZH] 异步刷盘：操作系统会在后台自动把 Page Cache 刷入物理磁盘
-                    // [EN] Async flush: OS will automatically flush Page Cache to physical disk in the background
-                    // [ZH] 注：如果极度追求数据安全性，可调用 mappedByteBuffer.force() 同步刷盘，但这会降低吞吐量
-                    // [EN] Note: For extreme data safety, call mappedByteBuffer.force() to sync flush, but it reduces throughput
-
-                    log.info("🚀 [Mock Kafka Zero-Copy] Persisted via mmap: {}", message);
+                    // [ZH] 生产环境建议根据吞吐量执行批量 force() / [EN] Recommend batch force() in production
                 }
             } catch (InterruptedException e) {
-                log.info("[Mock Kafka Zero-Copy] Writer thread interrupted.");
+                log.info("[Journal] Writer thread interrupted.");
                 Thread.currentThread().interrupt();
             } finally {
-                try {
-                    if (fileChannel != null && fileChannel.isOpen()) {
-                        fileChannel.close();
-                    }
-                } catch (IOException e) {
-                    log.error("Error closing file channel", e);
-                }
+                shutdown();
             }
         });
 
-        consumerThread.setDaemon(true);
-        consumerThread.setName("Kafka-mmap-Writer-Thread");
-        consumerThread.start();
+        writerThread.setDaemon(true);
+        writerThread.setName("Journal-Writer-Thread");
+        writerThread.start();
+    }
+
+    /**
+     * [ZH] 强制刷盘并释放资源
+     * [EN] Force flush and release resources
+     */
+    public static void shutdown() {
+        try {
+            if (mappedByteBuffer != null) {
+                mappedByteBuffer.force();
+            }
+            if (fileChannel != null && fileChannel.isOpen()) {
+                fileChannel.close();
+            }
+            log.info("[Journal] Persistent storage resources released.");
+        } catch (IOException e) {
+            log.error("[Journal] Error during resource release: ", e);
+        }
     }
 }
