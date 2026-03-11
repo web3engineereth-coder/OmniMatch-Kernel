@@ -35,6 +35,21 @@ public class Order {
     // [EN] Nanosecond timestamp to ensure "Time Priority" principle
     private final long timestamp;
 
+    // ==========================================
+    // [ZH] O(1) 撤单墓碑标记
+    // [EN] O(1) Cancellation Tombstone Flag
+    // ==========================================
+
+    // [ZH] 订单是否已被撤销 (默认 false)
+    // [EN] Whether the order is canceled (default false)
+    private boolean isCanceled = false;
+
+    // [ZH] 获取撤销状态
+    // [EN] Get cancellation status
+    public boolean isCanceled() {
+        return isCanceled;
+    }
+
     public Order(long orderId, long userId, OrderSide side, long price, long amount) {
         if (price <= 0 || amount <= 0) {
             // Exceptions MUST be in English
@@ -78,6 +93,17 @@ public class Order {
         BigInteger p = BigInteger.valueOf(this.price);
         BigInteger a = BigInteger.valueOf(tradedAmount);
         return p.multiply(a);
+    }
+
+    // [ZH] 执行撤单操作
+    // [EN] Execute cancellation operation
+    public void cancel() {
+        this.isCanceled = true;
+        // [ZH] 极其重要的安全防线：强制将剩余数量归零。
+        // [ZH] 这样即使它作为"僵尸节点"在被清理前被其他指针意外访问，其可撮合量也是 0，绝对不会引发资损。
+        // [EN] Crucial safety net: Force remaining amount to zero.
+        // [EN] Even if this zombie node is accidentally accessed before cleanup, its matchable amount is 0, preventing financial loss.
+        this.remainingAmount = 0;
     }
 
     @Override
