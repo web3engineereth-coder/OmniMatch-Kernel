@@ -1,31 +1,38 @@
 package cn.inlook.cex.domain.model;
 
 import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
+
 import java.math.BigInteger;
 
 // [ZH] 极客版高性能订单模型 (Zero-GC 倾向)
 // [ZH] 采用 long 替代 BigDecimal 以追求极致的内存连贯性和撮合性能。
+// [ZH] 为适配 Fastjson2 恢复逻辑，移除 final 字段并提供无参构造函数。
 // [EN] High-performance Order Model (Zero-GC oriented)
-// [EN] Uses 'long' instead of 'BigDecimal' to achieve extreme memory contiguity and matching performance.
+// [EN] Uses 'long' instead of 'BigDecimal' for extreme memory contiguity and performance.
+// [EN] 'final' removed and no-args constructor added for Fastjson2 recovery.
 @Getter
+@Setter
+@NoArgsConstructor
 public class Order {
 
     // [ZH] 订单全局唯一 ID
     // [EN] Globally unique Order ID
-    private final long orderId;
+    private long orderId;
 
     // [ZH] 用户 ID (建议网关层将 String 映射为 long，杜绝 String 开销)
     // [EN] User ID (Gateway should map String to long to eliminate String overhead)
-    private final long userId;
+    private long userId;
 
     // [ZH] 订单方向 (BUY / SELL)
     // [EN] Order direction (BUY / SELL)
-    private final OrderSide side;
+    private OrderSide side;
 
     // [ZH] 核心价格与初始数量，使用 long 存储
     // [EN] Core price and original amount, stored as long
-    private final long price;
-    private final long originalAmount;
+    private long price;
+    private long originalAmount;
 
     // [ZH] 剩余未成交数量
     // [EN] Remaining amount to be filled
@@ -33,7 +40,7 @@ public class Order {
 
     // [ZH] 纳秒级时间戳，保证“时间优先”原则
     // [EN] Nanosecond timestamp to ensure "Time Priority" principle
-    private final long timestamp;
+    private long timestamp;
 
     // ==========================================
     // [ZH] O(1) 撤单墓碑标记
@@ -50,6 +57,10 @@ public class Order {
         return isCanceled;
     }
 
+    /**
+     * [ZH] 业务构造函数：仅在下单接口手动创建订单时调用，包含严格校验。
+     * [EN] Business constructor: Invoked during manual order placement with strict validation.
+     */
     public Order(long orderId, long userId, OrderSide side, long price, long amount) {
         if (price <= 0 || amount <= 0) {
             // Exceptions MUST be in English

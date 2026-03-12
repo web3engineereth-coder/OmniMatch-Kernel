@@ -2,15 +2,18 @@ package cn.inlook.cex.infrastructure.mq;
 
 import com.alibaba.fastjson2.JSON;
 import lombok.extern.slf4j.Slf4j;
+import sun.misc.Unsafe;
 
 import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.lang.reflect.Field;
 import java.nio.MappedByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 /**
  * [ZH] 模拟高性能指令持久化引擎 (基于 mmap 零拷贝)
@@ -19,103 +22,115 @@ import java.util.concurrent.LinkedBlockingQueue;
 @Slf4j
 public class MockKafkaBroker {
 
-    // [ZH] 内部指令传输队列 / [EN] Internal command transport queue
     private static final BlockingQueue<Object> COMMAND_TOPIC = new LinkedBlockingQueue<>();
-
     private static final String JOURNAL_FILE_PATH = "trade_journal_zerocopy.log";
-
-    // [ZH] 预分配 100MB 日志空间 / [EN] Pre-allocate 100MB journal space
     private static final int SEGMENT_SIZE = 100 * 1024 * 1024;
 
     private static FileChannel fileChannel;
     private static MappedByteBuffer mappedByteBuffer;
-    private static int wrotePosition = 0;
+    private static volatile int wrotePosition = 0;
+    private static volatile boolean isRunning = true;
+    private static Thread writerThread;
 
     static {
         try {
             File file = new File(JOURNAL_FILE_PATH);
             RandomAccessFile raf = new RandomAccessFile(file, "rw");
             fileChannel = raf.getChannel();
-
-            // [ZH] 建立内存映射文件，实现零拷贝写入
-            // [EN] Establish memory-mapped file for zero-copy writing
             mappedByteBuffer = fileChannel.map(FileChannel.MapMode.READ_WRITE, 0, SEGMENT_SIZE);
-
-            log.info("[Journal] Initialized mmap persistence at: {}, Size: {} bytes",
-                    file.getAbsolutePath(), SEGMENT_SIZE);
-
+            log.info("[Journal] Initialized mmap persistence at: {}", file.getAbsolutePath());
         } catch (IOException e) {
             log.error("[Journal] Failed to initialize persistent storage: ", e);
             throw new RuntimeException("Persistence initialization failed", e);
         }
     }
 
-    /**
-     * [ZH] 发送原始指令至持久化层
-     * [EN] Send raw command to persistence layer
-     * @param command [ZH] 指令载体 (PLACE_ORDER/CANCEL_ORDER) / [EN] Command carrier
-     */
     public static void send(Object command) {
         COMMAND_TOPIC.offer(command);
     }
 
-    /**
-     * [ZH] 启动持久化消费者线程
-     * [EN] Start persistence consumer thread
-     */
     public static void startConsumers() {
-        Thread writerThread = new Thread(() -> {
+        isRunning = true;
+        writerThread = new Thread(() -> {
             log.info("[Journal] Sequential write thread started.");
             try {
-                while (!Thread.currentThread().isInterrupted()) {
-                    // [ZH] 阻塞获取指令数据 / [EN] Blocking take command data
-                    Object command = COMMAND_TOPIC.take();
+                while (isRunning || !COMMAND_TOPIC.isEmpty()) {
+                    Object command = COMMAND_TOPIC.poll(10, TimeUnit.MILLISECONDS);
+                    if (command == null) continue;
 
-                    // [ZH] 将指令序列化为 JSON 字符串并添加换行符
-                    // [EN] Serialize command to JSON string with newline
                     String jsonLine = JSON.toJSONString(command) + System.lineSeparator();
                     byte[] bytes = jsonLine.getBytes(StandardCharsets.UTF_8);
 
                     if (wrotePosition + bytes.length > SEGMENT_SIZE) {
-                        log.error("[Journal] Segment space exhausted. System must halt to prevent data loss.");
+                        log.error("[Journal] Segment space exhausted!");
                         break;
                     }
 
-                    // [ZH] 执行零拷贝写入 / [EN] Execute zero-copy write
-                    mappedByteBuffer.position(wrotePosition);
-                    mappedByteBuffer.put(bytes);
+                    mappedByteBuffer.put(wrotePosition, bytes);
                     wrotePosition += bytes.length;
-
-                    // [ZH] 生产环境建议根据吞吐量执行批量 force() / [EN] Recommend batch force() in production
                 }
             } catch (InterruptedException e) {
                 log.info("[Journal] Writer thread interrupted.");
                 Thread.currentThread().interrupt();
             } finally {
-                shutdown();
+                doReleaseResources();
             }
         });
 
-        writerThread.setDaemon(true);
+        writerThread.setDaemon(false);
         writerThread.setName("Journal-Writer-Thread");
         writerThread.start();
     }
 
     /**
-     * [ZH] 强制刷盘并释放资源
-     * [EN] Force flush and release resources
+     * [ZH] 优雅停机：同步等待写入完成并释放资源
+     * [EN] Graceful Shutdown: Synchronously wait for completion and release resources
      */
     public static void shutdown() {
+        isRunning = false;
+        try {
+            if (writerThread != null && writerThread.isAlive()) {
+                writerThread.join();
+            }
+        } catch (InterruptedException e) {
+            log.error("[Journal] Shutdown join interrupted: ", e);
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private static synchronized void doReleaseResources() {
         try {
             if (mappedByteBuffer != null) {
                 mappedByteBuffer.force();
+                // [ZH] 强制解除内存映射，否则文件会被系统锁定，导致 truncate 失效
+                // [EN] Force unmap to release file lock, otherwise truncate will fail
+                unmap(mappedByteBuffer);
+                mappedByteBuffer = null;
             }
             if (fileChannel != null && fileChannel.isOpen()) {
+                // [ZH] 物理截断文件至实际大小，彻底消除末尾 NUL 字符
+                // [EN] Truncate file to actual size to eliminate trailing NUL characters
+                fileChannel.truncate(wrotePosition);
                 fileChannel.close();
+                log.info("[Journal] Storage released. Final size: {} bytes", wrotePosition);
             }
-            log.info("[Journal] Persistent storage resources released.");
         } catch (IOException e) {
             log.error("[Journal] Error during resource release: ", e);
+        }
+    }
+
+    /**
+     * [ZH] 强行回收 MappedByteBuffer
+     * [EN] Forcibly unmap MappedByteBuffer
+     */
+    private static void unmap(MappedByteBuffer buffer) {
+        try {
+            Field field = Unsafe.class.getDeclaredField("theUnsafe");
+            field.setAccessible(true);
+            Unsafe unsafe = (Unsafe) field.get(null);
+            unsafe.invokeCleaner(buffer);
+        } catch (Exception e) {
+            log.warn("[Journal] Failed to unmap buffer: {}", e.getMessage());
         }
     }
 }
