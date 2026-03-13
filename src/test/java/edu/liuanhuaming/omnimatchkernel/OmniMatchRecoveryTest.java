@@ -16,8 +16,8 @@ import org.slf4j.LoggerFactory;
 import java.util.concurrent.Executors;
 
 /**
- * [ZH] 系统恢复性能测试：验证从 AOF 日志重演 1,000,000 指令的效率
- * [EN] Recovery Performance Test: Validate efficiency of replaying 1,000,000 commands from AOF
+ * [ZH] 系统恢复性能测试：验证快照秒级装载 + 增量日志断点重演的极限效率
+ * [EN] Recovery Performance Test: Validate efficiency of snapshot load + incremental AOF replay
  */
 public class OmniMatchRecoveryTest {
 
@@ -26,15 +26,29 @@ public class OmniMatchRecoveryTest {
     @Test
     public void testSystemRecoveryEfficiency() throws InterruptedException {
         log.warn("=====================================================");
-        log.warn("[RECOVERY TEST] Initializing fresh engine for state replay...");
+        log.warn("[RECOVERY TEST] System booting up. Initiating cold start sequence...");
         log.warn("=====================================================");
 
-        // 1. [ZH] 初始化全新的空引擎实例 / [EN] Initialize a fresh empty engine instance
+        // 1. [ZH] 创造处于绝对静止状态的空引擎
+        // 1. [EN] Create an empty engine in absolute halt state
         BalanceManager freshBalanceManager = new BalanceManager();
         MatchingEngine freshEngine = new MatchingEngine(freshBalanceManager);
+
+        // 2. [ZH] 🚀 核心阶段：单线程极限读档与重演 (此时 Disruptor 根本还没启动)
+        // 2. [EN] 🚀 Core Stage: Single-thread extreme load and replay (Disruptor not started yet)
+        RecoveryManager recoveryManager = new RecoveryManager(freshEngine);
+
+        long startTime = System.currentTimeMillis();
+        recoveryManager.startReplay();
+        long duration = System.currentTimeMillis() - startTime;
+
+        log.warn(">>> Recovery Phase Completed in {} ms! <<<", duration);
+
+        // 3. [ZH] 恢复完成，引擎状态已 100% 同步。此时才挂载消费者并启动网络层/队列
+        // 3. [EN] Recovery done, engine state 100% synced. Now mount consumer and start queue/network
+        log.warn("[RECOVERY TEST] State restored. Starting Disruptor to accept live traffic...");
         MatchingEventHandler handler = new MatchingEventHandler(freshEngine);
 
-        // 2. [ZH] 启动 Disruptor 管道 / [EN] Start Disruptor pipeline
         int bufferSize = 1024 * 1024;
         Disruptor<OrderEvent> disruptor = new Disruptor<>(
                 OrderEvent.FACTORY,
@@ -46,36 +60,11 @@ public class OmniMatchRecoveryTest {
 
         disruptor.handleEventsWith(handler);
         RingBuffer<OrderEvent> ringBuffer = disruptor.start();
+        log.warn("[RECOVERY TEST] Disruptor is online. System is fully operational.");
 
-        // 3. [ZH] 执行重演逻辑 / [EN] Execute replay logic
-        RecoveryManager recoveryManager = new RecoveryManager();
-
-        log.warn(">>> Start replaying from journal file...");
-        long startTime = System.currentTimeMillis();
-
-        // [ZH] 调用 RecoveryManager 逐行解析并注入 Disruptor
-        // [EN] Invoke RecoveryManager to parse and inject into Disruptor line by line
-        recoveryManager.startReplay(ringBuffer);
-
-        // 4. [ZH] 等待消费者完成最后一笔指令处理 / [EN] Wait for consumer to finish last command
-        long lastSeq = ringBuffer.getCursor();
-        while (handler.getSequence().get() < lastSeq) {
-            Thread.yield();
-        }
-
-        long endTime = System.currentTimeMillis();
-        long duration = endTime - startTime;
-
-        // 5. [ZH] 结果输出 / [EN] Output results
-        log.warn("=====================================================");
-        log.warn("Recovery Completed!");
-        log.warn("Time Taken for Replay: {} ms", duration);
-        if (duration > 0) {
-            double replayTps = (1000000.0 * 1000) / duration;
-            log.warn("Replay Speed: {} ops/sec", String.format("%.2f", replayTps));
-        }
-        log.warn("=====================================================");
-
+        // [ZH] 优雅停机
+        // [EN] Graceful shutdown
         disruptor.shutdown();
+        log.warn("=====================================================");
     }
 }

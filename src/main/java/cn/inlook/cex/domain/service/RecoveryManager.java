@@ -2,11 +2,9 @@ package cn.inlook.cex.domain.service;
 
 import cn.inlook.cex.domain.model.Order;
 import cn.inlook.cex.infrastructure.disruptor.DisruptorEventType;
-import cn.inlook.cex.infrastructure.disruptor.OrderEvent;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONObject;
 import com.alibaba.fastjson2.JSONException;
-import com.lmax.disruptor.RingBuffer;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.BufferedReader;
@@ -14,50 +12,89 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.util.Map;
 
 /**
- * [ZH] 系统恢复管理器：通过重演 AOF (Append Only File) 日志恢复撮合引擎内存状态
- * [EN] Recovery Manager: Replay AOF journals to restore matching engine in-memory state
+ * [ZH] 系统恢复管理器：二进制快照秒级装载 + AOF 增量日志断点重演
+ * [EN] Recovery Manager: Sub-second binary snapshot load + AOF incremental journal replay
  */
 @Slf4j
 public class RecoveryManager {
 
     private final String journalPath = "trade_journal_zerocopy.log";
 
+    // [ZH] 🚀 核心改动 1：不再传入 RingBuffer，而是直接持有引擎的引用
+    // [EN] 🚀 Core Change 1: Hold Engine reference directly instead of RingBuffer
+    private final MatchingEngine engine;
+    private final SnapshotManager snapshotManager;
+
+    public RecoveryManager(MatchingEngine engine) {
+        this.engine = engine;
+        this.snapshotManager = new SnapshotManager();
+    }
+
     /**
-     * [ZH] 执行状态重演：从持久化存储读取指令并重新注入 Disruptor 环形队列
-     * [EN] Execute state replay: Read commands from persistence and reinject into Disruptor RingBuffer
-     * @param ringBuffer [ZH] 撮合引擎的输入队列 / [EN] Input RingBuffer of the matching engine
+     * [ZH] 执行极速恢复：加载快照 -> 寻找断点 -> 裸跑引擎重演
+     * [EN] Execute ultra-fast recovery: Load snapshot -> Seek breakpoint -> Bare-metal engine replay
      */
-    public void startReplay(RingBuffer<OrderEvent> ringBuffer) {
+    public void startReplay() {
+        log.info("=====================================================");
+        log.info("[Recovery] Initializing OmniMatch Kernel State...");
+        long globalStartTime = System.currentTimeMillis();
+
+        // ==========================================
+        // 阶段 1：[ZH] 极速加载二进制快照 (Base State)
+        // ==========================================
+        Map<Long, Order> restoredOrders = snapshotManager.loadSnapshot();
+        boolean hasSnapshot = !restoredOrders.isEmpty();
+
+        if (hasSnapshot) {
+            // [ZH] 🚀 直接调用引擎刚刚开放的后门方法，瞬间注满内存
+            engine.restoreFromSnapshot(restoredOrders);
+            log.info("[Recovery] Stage 1: Snapshot baseline injected into engine. ({} orders)", restoredOrders.size());
+        }
+
+        // ==========================================
+        // 阶段 2：[ZH] 增量重演 AOF 日志 (Incremental Replay)
+        // ==========================================
         if (!Files.exists(Paths.get(journalPath))) {
-            log.info("[Recovery] No existing journal file found. Initializing fresh state.");
+            log.info("[Recovery] No existing journal file found. Starting as fresh instance.");
             return;
         }
 
-        log.info("[Recovery] Starting system state replay from journal: {}", journalPath);
+        log.info("[Recovery] Stage 2: Scanning journal for incremental commands: {}", journalPath);
 
-        long startTime = System.currentTimeMillis();
         long commandCount = 0;
         long skipCount = 0;
+        long historySkippedCount = 0; // [ZH] 记录因为快照而跳过的历史日志行数
 
-        try (BufferedReader reader = new BufferedReader(new FileReader(journalPath))) {
+        // [ZH] 断点标志：如果存在快照，我们需要在日志中找到那根 "红线"
+        boolean snapshotMarkerFound = !hasSnapshot;
+
+        try (BufferedReader reader = new BufferedReader(new FileReader(journalPath), 1024 * 1024)) {
             String line;
             while ((line = reader.readLine()) != null) {
                 line = line.trim();
-                // [ZH] 过滤空行或明显不符合 JSON 格式的脏数据 (mmap 预分配可能产生的空位)
-                // [EN] Filter empty lines or obvious junk data (potential nulls from mmap pre-allocation)
+
+                // [ZH] 保留你原本优秀的容错逻辑：过滤空洞与脏数据
                 if (line.isEmpty() || !line.startsWith("{")) {
                     continue;
                 }
 
+                // [ZH] 🚀 核心改动 2：断点寻址机制。在找到 MAKE_SNAPSHOT 之前，无脑跳过
+                if (!snapshotMarkerFound) {
+                    if (line.contains("\"MAKE_SNAPSHOT\"")) {
+                        snapshotMarkerFound = true;
+                        log.info("[Recovery] >>> Found MAKE_SNAPSHOT marker! Skipped {} historical lines. Commencing incremental replay...", historySkippedCount);
+                    } else {
+                        historySkippedCount++;
+                    }
+                    continue;
+                }
+
                 try {
-                    // [ZH] 解析 JSON 指令数据包
-                    // [EN] Parse JSON command packet
                     JSONObject packet = JSON.parseObject(line);
 
-                    // [ZH] 核心改动：必须包含 type 字段才是有效的恢复指令
-                    // [EN] Core change: Must contain 'type' field to be a valid recovery command
                     if (!packet.containsKey("type")) {
                         skipCount++;
                         continue;
@@ -66,27 +103,19 @@ public class RecoveryManager {
                     String typeStr = packet.getString("type");
                     DisruptorEventType type = DisruptorEventType.valueOf(typeStr);
 
-                    // [ZH] 申请 Disruptor 槽位进行状态重演
-                    // [EN] Claim Disruptor slot for state replay
-                    long sequence = ringBuffer.next();
-                    try {
-                        OrderEvent event = ringBuffer.get(sequence);
-                        event.setEventType(type);
-
-                        if (type == DisruptorEventType.PLACE_ORDER) {
-                            Order order = packet.getObject("data", Order.class);
-                            event.setOrder(order);
-                        } else if (type == DisruptorEventType.CANCEL_ORDER) {
-                            event.setCancelOrderId(packet.getLong("data"));
-                        }
-                    } finally {
-                        ringBuffer.publish(sequence);
+                    // [ZH] 🚀 核心改动 3：绕过 RingBuffer，以单线程最高速度直接向引擎下达指令
+                    if (type == DisruptorEventType.PLACE_ORDER) {
+                        Order order = packet.getObject("data", Order.class);
+                        engine.processOrder(order); // 直连！
+                        commandCount++;
+                    } else if (type == DisruptorEventType.CANCEL_ORDER) {
+                        long cancelOrderId = packet.getLongValue("data");
+                        engine.cancelOrder(cancelOrderId); // 直连！
+                        commandCount++;
                     }
-                    commandCount++;
 
                 } catch (JSONException | IllegalArgumentException e) {
-                    // [ZH] 记录行解析错误但允许继续执行，提高系统的容错生存能力
-                    // [EN] Log line parsing error but allow continuation to improve system resilience
+                    // [ZH] 依然保留你的单行容错能力
                     log.warn("[Recovery] Skipping corrupted or invalid line: {}", line);
                     skipCount++;
                 }
@@ -96,8 +125,16 @@ public class RecoveryManager {
             throw new RuntimeException("System recovery aborted due to I/O failure", e);
         }
 
-        long duration = System.currentTimeMillis() - startTime;
-        log.info("[Recovery] State replay completed. Restored: {}, Skipped: {}, Time: {} ms",
-                commandCount, skipCount, duration);
+        long duration = System.currentTimeMillis() - globalStartTime;
+        log.info("=====================================================");
+        log.info("[Recovery] 🚀 KERNEL RECOVERY COMPLETED IN {} ms!", duration);
+        log.info(" - Snapshot Orders: {}", restoredOrders.size());
+        log.info(" - History Skipped: {}", historySkippedCount);
+        log.info(" - Replayed Events: {}", commandCount);
+        log.info(" - Corrupted Skipped: {}", skipCount);
+        if (duration > 0 && commandCount > 0) {
+            log.info(" - Replay Speed:    {} ops/sec", String.format("%.2f", (commandCount * 1000.0) / duration));
+        }
+        log.info("=====================================================");
     }
 }

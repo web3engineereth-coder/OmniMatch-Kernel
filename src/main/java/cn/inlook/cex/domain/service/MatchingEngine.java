@@ -18,15 +18,19 @@ import java.util.Map;
 @Slf4j
 public class MatchingEngine {
 
-    private final OrderBook bids;
-    private final OrderBook asks;
-    private final BalanceManager balanceManager; // [ZH] 引入账务管理器 / [EN] Inject BalanceManager
+    // [ZH] 🚀 移除 final 修饰符，允许在快照加载时进行 O(1) 内存地址替换
+    // [EN] 🚀 Removed 'final' modifiers to allow O(1) memory address replacement during snapshot loading
+    private OrderBook bids;
+    private OrderBook asks;
+    private BalanceManager balanceManager; // [ZH] 引入账务管理器 / [EN] Inject BalanceManager
 
     // ==========================================
     // [ZH] 🚀 核心武器：全局订单哈希索引，实现 O(1) 撤单定位
+    // [ZH] 注意：此处已移除 final 修饰符，以便快照恢复时直接替换指针
     // [EN] 🚀 Core Weapon: Global order hash index for O(1) cancel positioning
+    // [EN] Note: Removed 'final' modifier to allow direct pointer replacement during snapshot recovery
     // ==========================================
-    private final Map<Long, Order> orderIndex = new HashMap<>();
+    private Map<Long, Order> orderIndex = new HashMap<>();
 
     // [ZH] 假设目前系统只处理一对交易对，比如 BTC/USDT
     // [EN] Assume the system handles one trading pair, e.g., BTC/USDT
@@ -173,5 +177,42 @@ public class MatchingEngine {
         // [EN] Return values() directly to avoid memory copy overhead.
         // [EN] Safety is guaranteed by Disruptor's single-threaded consumer model (Thread Confinement).
         return this.orderIndex.values();
+    }
+
+    /**
+     * [ZH] 毁灭并重生：系统重启时，通过二进制快照瞬间覆盖内存状态，并重建价格深度树
+     * [EN] Destroy and Rebirth: Instantly overwrite memory state via binary snapshot on restart, and rebuild depth trees
+     *
+     * @param snapshotOrders [ZH] 从 bin 文件中反序列化出的订单集合 / [EN] Orders deserialized from bin file
+     */
+    public void restoreFromSnapshot(Map<Long, Order> snapshotOrders) {
+        log.warn("[Engine] HALT! Replacing memory state with snapshot base...");
+        long startTime = System.currentTimeMillis();
+
+        // 1. [ZH] O(1) 覆盖全局哈希索引
+        // 1. [EN] O(1) Overwrite global hash index
+        this.orderIndex = snapshotOrders;
+
+        // 2. [ZH] 实例化全新的买卖盘
+        // 2. [EN] Instantiate fresh bid/ask order books
+        this.bids = new OrderBook(OrderSide.BUY);
+        this.asks = new OrderBook(OrderSide.SELL);
+
+        // 3. [ZH] 重建价格深度树 (OrderBook)
+        // [EN] Rebuild Price Depth Tree (OrderBook)
+        for (Order order : snapshotOrders.values()) {
+            // [ZH] 过滤掉可能的脏数据，仅将有效挂单塞回红黑树/跳表
+            // [EN] Filter dirty data, only push valid maker orders back to RB-Tree/SkipList
+            if (!order.isCanceled() && !order.isFilled()) {
+                if (order.getSide() == OrderSide.BUY) {
+                    this.bids.addOrder(order);
+                } else {
+                    this.asks.addOrder(order);
+                }
+            }
+        }
+
+        long timeTaken = System.currentTimeMillis() - startTime;
+        log.warn("[Engine] Snapshot memory injection complete! Rebuilt {} orders in {} ms.", snapshotOrders.size(), timeTaken);
     }
 }
