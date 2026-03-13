@@ -12,5 +12,14 @@ public enum DisruptorEventType {
 
     // [ZH] 撤销现有订单
     // [EN] Cancel existing order
-    CANCEL_ORDER
+    CANCEL_ORDER,
+
+    // ==========================================
+    // [ZH] 系统控制级指令
+    // [EN] System Control Level Commands
+    // ==========================================
+
+    // [ZH] 触发全量内存快照 (保障无锁一致性)
+    // [EN] Trigger full memory snapshot (Ensures lock-free consistency)
+    MAKE_SNAPSHOT
 }

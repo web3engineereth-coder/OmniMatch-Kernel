@@ -19,11 +19,10 @@ import org.slf4j.LoggerFactory;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ThreadFactory;
 
 /**
- * [ZH] 撮合引擎极限吞吐量基准测试 (集成 WAL 持久化)
- * [EN] Matching Engine Extreme Throughput Benchmark Test (Integrated with WAL Persistence)
+ * [ZH] 撮合引擎极限吞吐量基准测试 (集成 WAL 持久化与快照机制)
+ * [EN] Matching Engine Extreme Throughput Benchmark Test (Integrated with WAL and Snapshot)
  */
 public class OmniMatchPerfTest {
 
@@ -32,30 +31,27 @@ public class OmniMatchPerfTest {
     private static class DummyBalanceManager extends BalanceManager {
         @Override
         public void settle(long buyerId, long sellerId, int baseCurrency, int quoteCurrency, long amount, long price) {
-            // [ZH] 压测期间不执行真实的资产计算 / [EN] No real balance calculation during benchmark
+            // [ZH] 压测期间不执行真实的资产计算
+            // [EN] No real balance calculation during benchmark
         }
     }
 
     @Test
     public void testMatchingEngineThroughput() throws InterruptedException {
         log.warn("=====================================================");
-        log.warn("[STRESS TEST] Starting benchmark with WAL persistence.");
+        log.warn("[STRESS TEST] Starting benchmark with WAL and Snapshot mechanisms.");
         log.warn("=====================================================");
 
-        // [ZH] 1. 初始化持久化线程 / [EN] Initialize persistence thread
         MockKafkaBroker.startConsumers();
 
         BalanceManager dummyBalanceManager = new DummyBalanceManager();
         MatchingEngine engine = new MatchingEngine(dummyBalanceManager);
         MatchingEventHandler handler = new MatchingEventHandler(engine);
 
-        int bufferSize = 1024 * 1024;
-        ThreadFactory threadFactory = Executors.defaultThreadFactory();
-
         Disruptor<OrderEvent> disruptor = new Disruptor<>(
                 OrderEvent.FACTORY,
-                bufferSize,
-                threadFactory,
+                1024 * 1024,
+                Executors.defaultThreadFactory(),
                 ProducerType.SINGLE,
                 new YieldingWaitStrategy()
         );
@@ -64,64 +60,82 @@ public class OmniMatchPerfTest {
         RingBuffer<OrderEvent> ringBuffer = disruptor.start();
 
         long totalEvents = 1_000_000L;
-        log.warn("Injecting {} events with WAL recording...", totalEvents);
-
         long startTime = System.currentTimeMillis();
 
         for (long i = 1; i <= totalEvents; i++) {
+            // ==========================================
+            // 1. [ZH] 正常的业务指令下发 (下单/撤单)
+            // [EN] Normal business command dispatch (Place/Cancel)
+            // ==========================================
             long sequence = ringBuffer.next();
             try {
                 OrderEvent event = ringBuffer.get(sequence);
-
-                // [ZH] 构造指令包用于 WAL 落盘
-                // [EN] Construct command packet for WAL logging
                 Map<String, Object> commandPacket = new HashMap<>();
 
                 if (i % 10 == 0) {
                     event.setEventType(DisruptorEventType.CANCEL_ORDER);
                     event.setCancelOrderId(i - 1);
-
                     commandPacket.put("type", "CANCEL_ORDER");
                     commandPacket.put("data", i - 1);
                 } else {
                     OrderSide side = (i % 2 == 0) ? OrderSide.BUY : OrderSide.SELL;
-                    long price = 60000 + (i % 100);
-                    Order order = new Order(i, 1001L, side, price, 10L);
-
+                    Order order = new Order(i, 1001L, side, 60000 + (i % 100), 10L);
                     event.setEventType(DisruptorEventType.PLACE_ORDER);
                     event.setOrder(order);
-
                     commandPacket.put("type", "PLACE_ORDER");
                     commandPacket.put("data", order);
                 }
-
-                // ==========================================
-                // [ZH] 🚀 核心改动：在发布到 Disruptor 之前，先提交给持久化组件 (WAL)
-                // [ZH] 这样磁盘上存入的是原始指令，系统崩溃后可完全恢复
-                // [EN] 🚀 Core Change: Submit to persistence (WAL) BEFORE publishing to Disruptor
-                // [EN] This ensures raw commands are logged for full recovery after crash
-                // ==========================================
                 MockKafkaBroker.send(commandPacket);
-
             } finally {
                 ringBuffer.publish(sequence);
             }
+
+            // ==========================================
+            // 2. [ZH] 🚀 触发点：在第 50 万笔订单时，强行插入快照指令
+            // [EN] 🚀 Trigger Point: Forcibly insert a snapshot command at the 500,000th order
+            // ==========================================
+            if (i == 500_000) {
+                log.warn("[STRESS TEST] Reached 500,000 orders. Injecting MAKE_SNAPSHOT command into RingBuffer...");
+                long snapSeq = ringBuffer.next();
+                try {
+                    OrderEvent snapEvent = ringBuffer.get(snapSeq);
+                    snapEvent.setEventType(DisruptorEventType.MAKE_SNAPSHOT);
+
+                    // [ZH] 将快照标记同步写入 WAL 日志，用于日后的断点续传
+                    // [EN] Synchronously write snapshot marker to WAL for future breakpoint continuation
+                    Map<String, Object> snapPacket = new HashMap<>();
+                    snapPacket.put("type", "MAKE_SNAPSHOT");
+                    MockKafkaBroker.send(snapPacket);
+                } finally {
+                    ringBuffer.publish(snapSeq);
+                }
+            }
         }
 
-        // [ZH] 等待消费者处理完毕 / [EN] Wait for consumer to finish
+        // [ZH] 阻塞直至计算核心消费完毕
+        // [EN] Block until the matching core finishes consumption
         while (disruptor.getCursor() > handler.getSequence().get()) {
             Thread.yield();
         }
 
         long endTime = System.currentTimeMillis();
 
-        // [ZH] 停止持久化并确保所有数据已刷盘
-        // [EN] Shutdown persistence and ensure all data is flushed to disk
+        // [ZH] 执行同步停机，阻塞等待日志线程写完并执行 truncate
+        // [EN] Perform synchronous shutdown, wait for log thread and truncate
         MockKafkaBroker.shutdown();
         disruptor.shutdown();
 
+        // [ZH] 确保操作系统完成文件元数据截断
+        // [EN] Ensure OS finishes file metadata truncation
+        Thread.sleep(100);
+
         long timeTakenMs = endTime - startTime;
-        log.warn("Throughput (TPS): {} ops/sec", String.format("%.2f", (totalEvents * 1000.0) / timeTakenMs));
+        log.warn("=====================================================");
+        log.warn("Benchmark Completed! Time Taken: {} ms", timeTakenMs);
+
+        // [ZH] 注意：由于中间包含了 400ms 左右的纯 I/O 快照时间，整体 TPS 会发生合理范围内的下降
+        // [EN] Note: Overall TPS will drop reasonably due to the ~400ms pure I/O snapshot time
+        log.warn("Overall Throughput (TPS): {} ops/sec", String.format("%.2f", (totalEvents * 1000.0) / timeTakenMs));
         log.warn("=====================================================");
     }
 }

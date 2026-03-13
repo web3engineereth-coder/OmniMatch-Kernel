@@ -2,6 +2,7 @@ package cn.inlook.cex.infrastructure.disruptor;
 
 import cn.inlook.cex.domain.model.Order;
 import cn.inlook.cex.domain.service.MatchingEngine;
+import cn.inlook.cex.domain.service.SnapshotManager;
 import com.lmax.disruptor.EventHandler;
 import com.lmax.disruptor.Sequence;
 import lombok.extern.slf4j.Slf4j;
@@ -15,6 +16,10 @@ public class MatchingEventHandler implements EventHandler<OrderEvent> {
 
     private final MatchingEngine engine;
 
+    // [ZH] 注入二进制快照管理器
+    // [EN] Inject binary snapshot manager
+    private final SnapshotManager snapshotManager;
+
     // ==========================================
     // [ZH] 🚀 核心：手动维护消费进度序列，初始值为 -1
     // [ZH] 这样压测类通过 handler.getSequence().get() 就能知道消费者的实时进度
@@ -25,6 +30,7 @@ public class MatchingEventHandler implements EventHandler<OrderEvent> {
 
     public MatchingEventHandler(MatchingEngine engine) {
         this.engine = engine;
+        this.snapshotManager = new SnapshotManager();
     }
 
     /**
@@ -40,9 +46,12 @@ public class MatchingEventHandler implements EventHandler<OrderEvent> {
         try {
             // [ZH] 提取目标 ID 用于日志 (仅在 DEBUG/INFO 级别有效)
             // [EN] Extract target ID for logging
-            long targetOrderId = (event.getEventType() == DisruptorEventType.PLACE_ORDER && event.getOrder() != null)
-                    ? event.getOrder().getOrderId()
-                    : event.getCancelOrderId();
+            long targetOrderId = -1;
+            if (event.getEventType() == DisruptorEventType.PLACE_ORDER && event.getOrder() != null) {
+                targetOrderId = event.getOrder().getOrderId();
+            } else if (event.getEventType() == DisruptorEventType.CANCEL_ORDER) {
+                targetOrderId = event.getCancelOrderId();
+            }
 
             // [ZH] 注意：压测时请务必关闭此日志，否则 TPS 会被 I/O 卡死
             // [EN] Note: MUST disable this log during benchmark to avoid I/O bottleneck
@@ -62,7 +71,18 @@ public class MatchingEventHandler implements EventHandler<OrderEvent> {
                 }
             } else if (event.getEventType() == DisruptorEventType.CANCEL_ORDER) {
                 // [ZH] 执行 O(1) 极限撤单
+                // [EN] Execute O(1) extreme cancellation
                 engine.cancelOrder(event.getCancelOrderId());
+            } else if (event.getEventType() == DisruptorEventType.MAKE_SNAPSHOT) {
+                // ==========================================
+                // [ZH] 🚀 触发内存级物理快照
+                // [ZH] 此时消费者线程被独占，处于 Stop-The-World 状态，数据绝对一致
+                // [EN] 🚀 Trigger memory-level physical snapshot
+                // [EN] Consumer thread is exclusively occupied (Stop-The-World), data is absolutely consistent
+                // ==========================================
+                log.info("[Matcher] Snapshot command received at sequence: {}. Halting engine to dump memory...", sequence);
+                snapshotManager.saveSnapshot(engine.getActiveOrders());
+                log.info("[Matcher] Snapshot dump completed. Resuming matching engine...");
             }
 
         } catch (Exception e) {

@@ -6,6 +6,7 @@ import cn.inlook.cex.domain.model.OrderSide;
 import cn.inlook.cex.infrastructure.mq.MockKafkaBroker; // [ZH] 引入模拟 Kafka / [EN] Import mock Kafka
 import lombok.extern.slf4j.Slf4j;
 
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.Map;
@@ -145,5 +146,32 @@ public class MatchingEngine {
         // [ZH] 挂单存入全局哈希表，用于后续 O(1) 撤单定位
         // [EN] Store maker order in global hash map for subsequent O(1) cancel positioning
         orderIndex.put(order.getOrderId(), order);
+    }
+
+    // ==========================================
+    // [ZH] 系统快照与恢复支持接口
+    // [EN] System Snapshot and Recovery Support Interfaces
+    // ==========================================
+
+    /**
+     * [ZH] 获取当前引擎中所有存活的订单集合，用于生成二进制快照。
+     * [ZH] 警告：此方法返回的是底层数据结构的只读/直接视图，严禁在 Disruptor 消费者线程之外调用，以防破坏无锁并发安全！
+     * [EN] Get a collection of all active orders in the current engine for binary snapshot generation.
+     * [EN] WARNING: Returns a read-only/direct view of underlying data. Strictly forbid calling outside the Disruptor consumer thread to prevent breaking lock-free thread safety!
+     *
+     * @return [ZH] 活跃订单集合 / [EN] Collection of active orders
+     */
+    public Collection<Order> getActiveOrders() {
+        // [ZH] 假设你的底层全局索引是 orderIndex
+        // [EN] Assuming your underlying global index is orderIndex
+        if (this.orderIndex == null) {
+            return java.util.Collections.emptyList();
+        }
+
+        // [ZH] 直接返回 values()，避免内存拷贝开销。
+        // [ZH] 安全性由 Disruptor 的单线程消费模型 (Thread Confinement) 保证。
+        // [EN] Return values() directly to avoid memory copy overhead.
+        // [EN] Safety is guaranteed by Disruptor's single-threaded consumer model (Thread Confinement).
+        return this.orderIndex.values();
     }
 }
