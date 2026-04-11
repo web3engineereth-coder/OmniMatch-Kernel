@@ -11,7 +11,26 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
 class MatchingEngineInvariantGuardTest {
+
+    @Test
+    void shouldExposeInvariantFlagState() {
+        MatchingEngine defaultEngine = new MatchingEngine(
+                new RecordingAccountService(),
+                new RecordingTradeEventPublisher()
+        );
+        MatchingEngine guardedEngine = new MatchingEngine(
+                new RecordingAccountService(),
+                new RecordingTradeEventPublisher(),
+                true
+        );
+
+        assertFalse(defaultEngine.isInvariantCheckEnabled());
+        assertTrue(guardedEngine.isInvariantCheckEnabled());
+    }
 
     @Test
     void shouldPassInvariantForMultiLevelBooks() {
@@ -23,6 +42,21 @@ class MatchingEngineInvariantGuardTest {
         engine.processOrder(new Order(4L, 201L, OrderSide.SELL, 105L, 5L));
         engine.processOrder(new Order(5L, 202L, OrderSide.SELL, 103L, 5L));
         engine.processOrder(new Order(6L, 203L, OrderSide.SELL, 104L, 5L));
+
+        engine.assertInvariant();
+    }
+
+    @Test
+    void shouldRunInvariantGuardAutomaticallyWhenEnabled() {
+        MatchingEngine engine = new MatchingEngine(
+                new RecordingAccountService(),
+                new RecordingTradeEventPublisher(),
+                true
+        );
+
+        engine.processOrder(new Order(1L, 201L, OrderSide.SELL, 100L, 10L));
+        engine.processOrder(new Order(2L, 101L, OrderSide.BUY, 100L, 5L));
+        engine.cancelOrder(1L);
 
         engine.assertInvariant();
     }

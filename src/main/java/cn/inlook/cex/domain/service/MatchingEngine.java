@@ -30,6 +30,7 @@ public class MatchingEngine {
     private OrderBook asks;
     private final AccountService accountService;
     private final TradeEventPublisher tradeEventPublisher;
+    private final boolean enableInvariantCheck;
 
     // [ZH] 全局订单节点索引，用于 O(1) 撤单
     // [EN] Global order-node index for O(1) cancellation
@@ -39,23 +40,31 @@ public class MatchingEngine {
     private final int quoteCurrency = 2;
 
     public MatchingEngine(BalanceManager balanceManager) {
-        this(new BalanceManagerAccountService(balanceManager, 1, 2), new NoopTradeEventPublisher());
+        this(new BalanceManagerAccountService(balanceManager, 1, 2), new NoopTradeEventPublisher(), false);
     }
 
     public MatchingEngine(AccountService accountService) {
-        this(accountService, new NoopTradeEventPublisher());
+        this(accountService, new NoopTradeEventPublisher(), false);
     }
 
     public MatchingEngine(AccountService accountService, TradeEventPublisher tradeEventPublisher) {
+        this(accountService, tradeEventPublisher, false);
+    }
+
+    public MatchingEngine(AccountService accountService,
+                          TradeEventPublisher tradeEventPublisher,
+                          boolean enableInvariantCheck) {
         this.bids = new OrderBook(OrderSide.BUY);
         this.asks = new OrderBook(OrderSide.SELL);
         this.accountService = Objects.requireNonNull(accountService, "accountService");
         this.tradeEventPublisher = Objects.requireNonNull(tradeEventPublisher, "tradeEventPublisher");
+        this.enableInvariantCheck = enableInvariantCheck;
     }
 
     public void processOrder(Order incomingOrder) {
         if (!accountService.reserveForOrder(incomingOrder)) {
             log.warn("Order {} rejected by account boundary.", incomingOrder.getOrderId());
+            runInvariantCheckIfEnabled();
             return;
         }
 
@@ -68,12 +77,15 @@ public class MatchingEngine {
         if (!incomingOrder.isFilled() && !incomingOrder.isCanceled()) {
             addLimitOrder(incomingOrder);
         }
+
+        runInvariantCheckIfEnabled();
     }
 
     public void cancelOrder(long orderId) {
         OrderNode node = orderMap.remove(orderId);
         if (node == null) {
             log.warn("Cancel failed: Order {} not found or already removed.", orderId);
+            runInvariantCheckIfEnabled();
             return;
         }
 
@@ -81,6 +93,7 @@ public class MatchingEngine {
         node.cancel();
         getBook(node.getSide()).removeNode(node);
         log.info("Order {} canceled and detached from price level {}.", orderId, node.getPrice());
+        runInvariantCheckIfEnabled();
     }
 
     private void match(Order taker, OrderBook makerBook) {
@@ -219,6 +232,10 @@ public class MatchingEngine {
         return quoteCurrency;
     }
 
+    public boolean isInvariantCheckEnabled() {
+        return enableInvariantCheck;
+    }
+
     // [ZH] 开发/测试期自检：验证订单簿、价格档位与 orderMap 的关键不变量
     // [EN] Dev/test invariant guard validating the core book, levels, and orderMap consistency
     public void assertInvariant() {
@@ -326,5 +343,11 @@ public class MatchingEngine {
 
     private void failInvariant(String message) {
         throw new IllegalStateException("MatchingEngine invariant violation: " + message);
+    }
+
+    private void runInvariantCheckIfEnabled() {
+        if (enableInvariantCheck) {
+            assertInvariant();
+        }
     }
 }

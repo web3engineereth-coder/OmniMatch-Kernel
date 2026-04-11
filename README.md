@@ -230,3 +230,8 @@ It is not intended to be a full exchange implementation yet. The current emphasi
 ## 📬 Contact
 
 * GitHub: https://github.com/web3engineereth-coder
+
+* **Website**: [in-look.cn](https://www.in-look.cn/)
+* **Email**: [ceekayshen@foxmail.com](mailto:ceekayshen@foxmail.com)
+
+Developed as a production-like matching engine prototype for exploring **high-performance trading infrastructure**, **deterministic order matching**, and **Web3-adjacent exchange system design**.

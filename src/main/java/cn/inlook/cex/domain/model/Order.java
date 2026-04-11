@@ -17,6 +17,8 @@ import java.math.BigInteger;
 @NoArgsConstructor
 public class Order {
 
+    public static final String DEFAULT_SYMBOL = "DEFAULT";
+
     // [ZH] 订单全局唯一 ID
     // [EN] Globally unique Order ID
     private long orderId;
@@ -28,6 +30,10 @@ public class Order {
     // [ZH] 订单方向 (BUY / SELL)
     // [EN] Order direction (BUY / SELL)
     private OrderSide side;
+
+    // [ZH] 交易对标识，例如 BTC-USDT
+    // [EN] Trading pair symbol, e.g. BTC-USDT
+    private String symbol = DEFAULT_SYMBOL;
 
     // [ZH] 核心价格与初始数量，使用 long 存储
     // [EN] Core price and original amount, stored as long
@@ -66,12 +72,20 @@ public class Order {
      * [EN] Business constructor: Invoked during manual order placement with strict validation.
      */
     public Order(long orderId, long userId, OrderSide side, long price, long amount) {
+        this(orderId, userId, DEFAULT_SYMBOL, side, price, amount);
+    }
+
+    public Order(long orderId, long userId, String symbol, OrderSide side, long price, long amount) {
         if (price <= 0 || amount <= 0) {
             // Exceptions MUST be in English
             throw new IllegalArgumentException("Price and amount must be strictly positive.");
         }
+        if (symbol == null || symbol.isBlank()) {
+            throw new IllegalArgumentException("Symbol must not be blank.");
+        }
         this.orderId = orderId;
         this.userId = userId;
+        this.symbol = symbol;
         this.side = side;
         this.price = price;
         this.originalAmount = amount;
@@ -132,7 +146,7 @@ public class Order {
     public String toString() {
         // [ZH] 英文日志，方便 ELK / Datadog 等日志监控系统进行正则解析
         // [EN] English logs for easy regex parsing in monitoring systems like ELK / Datadog
-        return String.format("Order[id=%d, uid=%d, side=%s, price=%d, rem/orig=%d/%d]",
-                orderId, userId, side, price, remainingAmount, originalAmount);
+        return String.format("Order[id=%d, uid=%d, symbol=%s, side=%s, price=%d, rem/orig=%d/%d]",
+                orderId, userId, symbol, side, price, remainingAmount, originalAmount);
     }
 }
