@@ -25,7 +25,8 @@ public class MatchingEngine {
 
     private OrderBook bids;
     private OrderBook asks;
-    private AccountService accountService;
+    private final AccountService accountService;
+    private final TradeEventPublisher tradeEventPublisher;
 
     // [ZH] 全局订单节点索引，用于 O(1) 撤单
     // [EN] Global order-node index for O(1) cancellation
@@ -35,13 +36,18 @@ public class MatchingEngine {
     private final int quoteCurrency = 2;
 
     public MatchingEngine(BalanceManager balanceManager) {
-        this(new BalanceManagerAccountService(balanceManager, 1, 2));
+        this(new BalanceManagerAccountService(balanceManager, 1, 2), new NoopTradeEventPublisher());
     }
 
     public MatchingEngine(AccountService accountService) {
+        this(accountService, new NoopTradeEventPublisher());
+    }
+
+    public MatchingEngine(AccountService accountService, TradeEventPublisher tradeEventPublisher) {
         this.bids = new OrderBook(OrderSide.BUY);
         this.asks = new OrderBook(OrderSide.SELL);
         this.accountService = accountService;
+        this.tradeEventPublisher = tradeEventPublisher;
     }
 
     public void processOrder(Order incomingOrder) {
@@ -91,9 +97,7 @@ public class MatchingEngine {
 
                 TradeEvent tradeEvent = buildTradeEvent(taker, makerNode, bestPrice, tradedQty);
                 accountService.settleTrade(tradeEvent);
-
-                log.info("TRADE: taker={} maker={} amount={} price={}",
-                        taker.getOrderId(), makerNode.getOrderId(), tradedQty, bestPrice);
+                tradeEventPublisher.publish(tradeEvent);
 
                 if (makerNode.isFilled()) {
                     makerBook.removeNode(makerNode);

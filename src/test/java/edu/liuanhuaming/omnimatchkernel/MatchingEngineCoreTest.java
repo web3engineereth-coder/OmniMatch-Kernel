@@ -6,6 +6,7 @@ import cn.inlook.cex.domain.model.OrderStatus;
 import cn.inlook.cex.domain.model.TradeEvent;
 import cn.inlook.cex.domain.service.AccountService;
 import cn.inlook.cex.domain.service.MatchingEngine;
+import cn.inlook.cex.domain.service.TradeEventPublisher;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -19,7 +20,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 public class MatchingEngineCoreTest {
 
     private final RecordingAccountService accountService = new RecordingAccountService();
-    private final MatchingEngine engine = new MatchingEngine(accountService);
+    private final RecordingTradeEventPublisher tradeEventPublisher = new RecordingTradeEventPublisher();
+    private final MatchingEngine engine = new MatchingEngine(accountService, tradeEventPublisher);
 
     @Test
     void shouldEnterBookAndExposeBestBid() {
@@ -54,6 +56,7 @@ public class MatchingEngineCoreTest {
         assertEquals(OrderStatus.PARTIALLY_FILLED, restingOrder.getStatus());
         assertEquals(List.of(1L), engine.getOrderIdsAtPrice(OrderSide.BUY, 100L));
         assertEquals(1, accountService.tradeEvents.size());
+        assertEquals(1, tradeEventPublisher.tradeEvents.size());
     }
 
     @Test
@@ -92,6 +95,16 @@ public class MatchingEngineCoreTest {
         assertNull(engine.getBestBidPrice());
         assertNull(engine.getBestAskPrice());
         assertTrue(accountService.tradeEvents.size() >= 1);
+        assertTrue(tradeEventPublisher.tradeEvents.size() >= 1);
+    }
+
+    @Test
+    void shouldNotPublishTradeEventWhenNoMatchOccurs() {
+        engine.processOrder(new Order(1L, 101L, OrderSide.BUY, 100L, 5L));
+        engine.processOrder(new Order(2L, 201L, OrderSide.SELL, 105L, 5L));
+
+        assertEquals(0, tradeEventPublisher.tradeEvents.size());
+        assertEquals(0, accountService.tradeEvents.size());
     }
 
     private static class RecordingAccountService implements AccountService {
@@ -99,6 +112,15 @@ public class MatchingEngineCoreTest {
 
         @Override
         public void settleTrade(TradeEvent tradeEvent) {
+            tradeEvents.add(tradeEvent);
+        }
+    }
+
+    private static class RecordingTradeEventPublisher implements TradeEventPublisher {
+        private final List<TradeEvent> tradeEvents = new ArrayList<>();
+
+        @Override
+        public void publish(TradeEvent tradeEvent) {
             tradeEvents.add(tradeEvent);
         }
     }
