@@ -15,6 +15,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * [ZH] 核心撮合引擎 - 单线程事件驱动，内部使用 PriceLevel + OrderNode 结构
@@ -46,8 +47,8 @@ public class MatchingEngine {
     public MatchingEngine(AccountService accountService, TradeEventPublisher tradeEventPublisher) {
         this.bids = new OrderBook(OrderSide.BUY);
         this.asks = new OrderBook(OrderSide.SELL);
-        this.accountService = accountService;
-        this.tradeEventPublisher = tradeEventPublisher;
+        this.accountService = Objects.requireNonNull(accountService, "accountService");
+        this.tradeEventPublisher = Objects.requireNonNull(tradeEventPublisher, "tradeEventPublisher");
     }
 
     public void processOrder(Order incomingOrder) {
@@ -97,6 +98,9 @@ public class MatchingEngine {
 
                 TradeEvent tradeEvent = buildTradeEvent(taker, makerNode, bestPrice, tradedQty);
                 accountService.settleTrade(tradeEvent);
+
+                // [ZH] 成交副作用通过发布边界输出，撮合核心本身不直接记录成交日志
+                // [EN] Trade side effects leave through the publication boundary, not direct core logging
                 tradeEventPublisher.publish(tradeEvent);
 
                 if (makerNode.isFilled()) {

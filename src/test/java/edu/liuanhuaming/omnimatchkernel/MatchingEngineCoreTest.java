@@ -52,11 +52,19 @@ public class MatchingEngineCoreTest {
         engine.processOrder(new Order(2L, 201L, OrderSide.SELL, 100L, 4L));
 
         Order restingOrder = engine.findActiveOrder(1L);
+        TradeEvent publishedEvent = tradeEventPublisher.tradeEvents.get(0);
         assertEquals(6L, restingOrder.getRemainingAmount());
         assertEquals(OrderStatus.PARTIALLY_FILLED, restingOrder.getStatus());
         assertEquals(List.of(1L), engine.getOrderIdsAtPrice(OrderSide.BUY, 100L));
         assertEquals(1, accountService.tradeEvents.size());
         assertEquals(1, tradeEventPublisher.tradeEvents.size());
+        assertEquals(1L, publishedEvent.getMakerOrderId());
+        assertEquals(2L, publishedEvent.getTakerOrderId());
+        assertEquals(4L, publishedEvent.getQuantity());
+        assertEquals(100L, publishedEvent.getPrice());
+        assertEquals(6L, publishedEvent.getMakerRemainingQty());
+        assertEquals(OrderStatus.PARTIALLY_FILLED, publishedEvent.getMakerStatus());
+        assertEquals(OrderStatus.FILLED, publishedEvent.getTakerStatus());
     }
 
     @Test
@@ -105,6 +113,9 @@ public class MatchingEngineCoreTest {
 
         assertEquals(0, tradeEventPublisher.tradeEvents.size());
         assertEquals(0, accountService.tradeEvents.size());
+        assertEquals(2, engine.getActiveOrderCount());
+        assertEquals(100L, engine.getBestBidPrice());
+        assertEquals(105L, engine.getBestAskPrice());
     }
 
     private static class RecordingAccountService implements AccountService {

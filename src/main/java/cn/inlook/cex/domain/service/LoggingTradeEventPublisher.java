@@ -10,6 +10,8 @@ public class LoggingTradeEventPublisher implements TradeEventPublisher {
 
     @Override
     public void publish(TradeEvent tradeEvent) {
+        // [ZH] 保留原有成交日志行为，但从撮合核心中抽离出来
+        // [EN] Preserve the existing trade log behavior outside the matching core
         log.info("TRADE: taker={} maker={} amount={} price={}",
                 tradeEvent.getTakerOrderId(),
                 tradeEvent.getMakerOrderId(),
