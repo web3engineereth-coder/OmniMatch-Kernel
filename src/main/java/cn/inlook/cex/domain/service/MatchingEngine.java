@@ -1,10 +1,15 @@
 package cn.inlook.cex.domain.service;
 
+import cn.inlook.cex.domain.model.CancelOrderCommand;
 import cn.inlook.cex.domain.model.Order;
 import cn.inlook.cex.domain.model.OrderBook;
+import cn.inlook.cex.domain.model.OrderCanceledEvent;
 import cn.inlook.cex.domain.model.OrderNode;
+import cn.inlook.cex.domain.model.OrderRejectReason;
+import cn.inlook.cex.domain.model.OrderRejectedEvent;
 import cn.inlook.cex.domain.model.OrderSide;
 import cn.inlook.cex.domain.model.OrderStatus;
+import cn.inlook.cex.domain.model.PlaceOrderCommand;
 import cn.inlook.cex.domain.model.PriceLevel;
 import cn.inlook.cex.domain.model.TradeEvent;
 import lombok.extern.slf4j.Slf4j;
@@ -30,6 +35,8 @@ public class MatchingEngine {
     private OrderBook asks;
     private final AccountService accountService;
     private final TradeEventPublisher tradeEventPublisher;
+    private final OrderCanceledEventPublisher orderCanceledEventPublisher;
+    private final OrderRejectedEventPublisher orderRejectedEventPublisher;
     private final boolean enableInvariantCheck;
 
     // [ZH] 全局订单节点索引，用于 O(1) 撤单
@@ -40,30 +47,89 @@ public class MatchingEngine {
     private final int quoteCurrency = 2;
 
     public MatchingEngine(BalanceManager balanceManager) {
-        this(new BalanceManagerAccountService(balanceManager, 1, 2), new NoopTradeEventPublisher(), false);
+        this(new BalanceManagerAccountService(balanceManager, 1, 2),
+                new NoopTradeEventPublisher(),
+                new NoopOrderCanceledEventPublisher(),
+                new NoopOrderRejectedEventPublisher(),
+                false);
     }
 
     public MatchingEngine(AccountService accountService) {
-        this(accountService, new NoopTradeEventPublisher(), false);
+        this(accountService,
+                new NoopTradeEventPublisher(),
+                new NoopOrderCanceledEventPublisher(),
+                new NoopOrderRejectedEventPublisher(),
+                false);
     }
 
     public MatchingEngine(AccountService accountService, TradeEventPublisher tradeEventPublisher) {
-        this(accountService, tradeEventPublisher, false);
+        this(accountService,
+                tradeEventPublisher,
+                new NoopOrderCanceledEventPublisher(),
+                new NoopOrderRejectedEventPublisher(),
+                false);
     }
 
     public MatchingEngine(AccountService accountService,
                           TradeEventPublisher tradeEventPublisher,
                           boolean enableInvariantCheck) {
+        this(accountService,
+                tradeEventPublisher,
+                new NoopOrderCanceledEventPublisher(),
+                new NoopOrderRejectedEventPublisher(),
+                enableInvariantCheck);
+    }
+
+    public MatchingEngine(AccountService accountService,
+                          TradeEventPublisher tradeEventPublisher,
+                          OrderCanceledEventPublisher orderCanceledEventPublisher,
+                          OrderRejectedEventPublisher orderRejectedEventPublisher) {
+        this(accountService,
+                tradeEventPublisher,
+                orderCanceledEventPublisher,
+                orderRejectedEventPublisher,
+                false);
+    }
+
+    public MatchingEngine(AccountService accountService,
+                          TradeEventPublisher tradeEventPublisher,
+                          OrderCanceledEventPublisher orderCanceledEventPublisher,
+                          OrderRejectedEventPublisher orderRejectedEventPublisher,
+                          boolean enableInvariantCheck) {
         this.bids = new OrderBook(OrderSide.BUY);
         this.asks = new OrderBook(OrderSide.SELL);
         this.accountService = Objects.requireNonNull(accountService, "accountService");
         this.tradeEventPublisher = Objects.requireNonNull(tradeEventPublisher, "tradeEventPublisher");
+        this.orderCanceledEventPublisher = Objects.requireNonNull(orderCanceledEventPublisher, "orderCanceledEventPublisher");
+        this.orderRejectedEventPublisher = Objects.requireNonNull(orderRejectedEventPublisher, "orderRejectedEventPublisher");
         this.enableInvariantCheck = enableInvariantCheck;
+    }
+
+    public void handle(PlaceOrderCommand command) {
+        Order order = new Order(
+                command.getOrderId(),
+                command.getUserId(),
+                command.getSymbol(),
+                command.getSide(),
+                command.getPrice(),
+                command.getQuantity());
+        order.setTimestamp(command.getTimestamp());
+        processOrder(order);
+    }
+
+    public void handle(CancelOrderCommand command) {
+        cancelOrder(command.getOrderId(), command.getSymbol(), command.getUserId(), command.getTimestamp(), true);
     }
 
     public void processOrder(Order incomingOrder) {
         if (!accountService.reserveForOrder(incomingOrder)) {
             log.warn("Order {} rejected by account boundary.", incomingOrder.getOrderId());
+            publishRejectedEvent(
+                    incomingOrder.getSymbol(),
+                    incomingOrder.getOrderId(),
+                    incomingOrder.getUserId(),
+                    OrderRejectReason.INSUFFICIENT_BALANCE,
+                    incomingOrder.getTimestamp());
             runInvariantCheckIfEnabled();
             return;
         }
@@ -82,18 +148,7 @@ public class MatchingEngine {
     }
 
     public void cancelOrder(long orderId) {
-        OrderNode node = orderMap.remove(orderId);
-        if (node == null) {
-            log.warn("Cancel failed: Order {} not found or already removed.", orderId);
-            runInvariantCheckIfEnabled();
-            return;
-        }
-
-        accountService.releaseOnCancel(node.getOrder());
-        node.cancel();
-        getBook(node.getSide()).removeNode(node);
-        log.info("Order {} canceled and detached from price level {}.", orderId, node.getPrice());
-        runInvariantCheckIfEnabled();
+        cancelOrder(orderId, null, 0L, System.nanoTime(), false);
     }
 
     private void match(Order taker, OrderBook makerBook) {
@@ -157,6 +212,36 @@ public class MatchingEngine {
         OrderNode node = new OrderNode(order);
         getBook(order.getSide()).addOrder(node);
         orderMap.put(order.getOrderId(), node);
+    }
+
+    private void cancelOrder(long orderId,
+                             String symbol,
+                             long userId,
+                             long timestamp,
+                             boolean publishMissingOrderReject) {
+        OrderNode node = orderMap.remove(orderId);
+        if (node == null) {
+            log.warn("Cancel failed: Order {} not found or already removed.", orderId);
+            if (publishMissingOrderReject) {
+                publishRejectedEvent(symbol, orderId, userId, OrderRejectReason.ORDER_NOT_FOUND, timestamp);
+            }
+            runInvariantCheckIfEnabled();
+            return;
+        }
+
+        Order order = node.getOrder();
+        long remainingQuantity = order.getRemainingAmount();
+        accountService.releaseOnCancel(order);
+        node.cancel();
+        getBook(node.getSide()).removeNode(node);
+        orderCanceledEventPublisher.publish(new OrderCanceledEvent(
+                order.getSymbol(),
+                order.getOrderId(),
+                order.getUserId(),
+                remainingQuantity,
+                timestamp));
+        log.info("Order {} canceled and detached from price level {}.", orderId, node.getPrice());
+        runInvariantCheckIfEnabled();
     }
 
     private OrderBook getBook(OrderSide side) {
@@ -343,6 +428,14 @@ public class MatchingEngine {
 
     private void failInvariant(String message) {
         throw new IllegalStateException("MatchingEngine invariant violation: " + message);
+    }
+
+    private void publishRejectedEvent(String symbol,
+                                      long orderId,
+                                      long userId,
+                                      OrderRejectReason reason,
+                                      long timestamp) {
+        orderRejectedEventPublisher.publish(new OrderRejectedEvent(symbol, orderId, userId, reason, timestamp));
     }
 
     private void runInvariantCheckIfEnabled() {
