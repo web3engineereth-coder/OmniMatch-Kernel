@@ -2,217 +2,210 @@ package cn.inlook.cex.domain.service;
 
 import cn.inlook.cex.domain.model.Order;
 import cn.inlook.cex.domain.model.OrderBook;
+import cn.inlook.cex.domain.model.OrderNode;
 import cn.inlook.cex.domain.model.OrderSide;
-import cn.inlook.cex.infrastructure.mq.MockKafkaBroker; // [ZH] 引入模拟 Kafka / [EN] Import mock Kafka
+import cn.inlook.cex.domain.model.OrderStatus;
+import cn.inlook.cex.domain.model.PriceLevel;
+import cn.inlook.cex.domain.model.TradeEvent;
 import lombok.extern.slf4j.Slf4j;
 
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
-import java.util.LinkedList;
+import java.util.List;
 import java.util.Map;
 
 /**
- * [ZH] 核心撮合引擎 - 集成账务结算、异步广播与 O(1) 极速撤单
- * [EN] Core Matching Engine - Integrated with Balance Settlement, Async Broadcast, and O(1) Cancel
+ * [ZH] 核心撮合引擎 - 单线程事件驱动，内部使用 PriceLevel + OrderNode 结构
+ * [EN] Core matching engine using a single-threaded event-driven flow with PriceLevel + OrderNode
  */
 @Slf4j
 public class MatchingEngine {
 
-    // [ZH] 🚀 移除 final 修饰符，允许在快照加载时进行 O(1) 内存地址替换
-    // [EN] 🚀 Removed 'final' modifiers to allow O(1) memory address replacement during snapshot loading
     private OrderBook bids;
     private OrderBook asks;
-    private BalanceManager balanceManager; // [ZH] 引入账务管理器 / [EN] Inject BalanceManager
+    private AccountService accountService;
 
-    // ==========================================
-    // [ZH] 🚀 核心武器：全局订单哈希索引，实现 O(1) 撤单定位
-    // [ZH] 注意：此处已移除 final 修饰符，以便快照恢复时直接替换指针
-    // [EN] 🚀 Core Weapon: Global order hash index for O(1) cancel positioning
-    // [EN] Note: Removed 'final' modifier to allow direct pointer replacement during snapshot recovery
-    // ==========================================
-    private Map<Long, Order> orderIndex = new HashMap<>();
+    // [ZH] 全局订单节点索引，用于 O(1) 撤单
+    // [EN] Global order-node index for O(1) cancellation
+    private Map<Long, OrderNode> orderMap = new HashMap<>();
 
-    // [ZH] 假设目前系统只处理一对交易对，比如 BTC/USDT
-    // [EN] Assume the system handles one trading pair, e.g., BTC/USDT
-    private final int baseCurrency = 1;  // BTC
-    private final int quoteCurrency = 2; // USDT
+    private final int baseCurrency = 1;
+    private final int quoteCurrency = 2;
 
     public MatchingEngine(BalanceManager balanceManager) {
+        this(new BalanceManagerAccountService(balanceManager, 1, 2));
+    }
+
+    public MatchingEngine(AccountService accountService) {
         this.bids = new OrderBook(OrderSide.BUY);
         this.asks = new OrderBook(OrderSide.SELL);
-        this.balanceManager = balanceManager;
+        this.accountService = accountService;
     }
 
-    public void processOrder(Order takerOrder) {
-        if (takerOrder.getSide() == OrderSide.BUY) {
-            match(takerOrder, asks);
-        } else {
-            match(takerOrder, bids);
-        }
-
-        if (!takerOrder.isFilled()) {
-            addLimitOrder(takerOrder);
-        }
-    }
-
-    // ==========================================
-    // [ZH] 新增：O(1) 极限撤单逻辑 (墓碑模式)
-    // [EN] New: O(1) Limit-speed Cancellation Logic (Tombstone Pattern)
-    // ==========================================
-    public void cancelOrder(long orderId) {
-        // [ZH] 1. O(1) 极速定位订单实体
-        // [EN] 1. O(1) ultra-fast positioning of the order entity
-        Order orderToCancel = orderIndex.get(orderId);
-
-        if (orderToCancel == null) {
-            log.warn("Cancel failed: Order {} not found or already filled.", orderId);
+    public void processOrder(Order incomingOrder) {
+        if (!accountService.reserveForOrder(incomingOrder)) {
+            log.warn("Order {} rejected by account boundary.", incomingOrder.getOrderId());
             return;
         }
 
-        // [ZH] 2. 打上墓碑标记，逻辑删除 (需确保 Order 对象内将其 remainingAmount 归零)
-        // [EN] 2. Mark with tombstone, logical deletion (Ensure Order object sets remainingAmount to zero)
-        orderToCancel.cancel();
+        if (incomingOrder.getSide() == OrderSide.BUY) {
+            match(incomingOrder, asks);
+        } else {
+            match(incomingOrder, bids);
+        }
 
-        // [ZH] 3. 从全局索引中立即剔除，释放内存追踪
-        // [EN] 3. Remove from global index immediately to release memory tracking
-        orderIndex.remove(orderId);
+        if (!incomingOrder.isFilled() && !incomingOrder.isCanceled()) {
+            addLimitOrder(incomingOrder);
+        }
+    }
 
-        log.info("Order {} marked as CANCELED (Tombstone applied).", orderId);
+    public void cancelOrder(long orderId) {
+        OrderNode node = orderMap.remove(orderId);
+        if (node == null) {
+            log.warn("Cancel failed: Order {} not found or already removed.", orderId);
+            return;
+        }
+
+        node.cancel();
+        getBook(node.getSide()).removeNode(node);
+        accountService.releaseOnCancel(node.getOrder());
+        log.info("Order {} canceled and detached from price level {}.", orderId, node.getPrice());
     }
 
     private void match(Order taker, OrderBook makerBook) {
         while (!makerBook.isEmpty() && !taker.isFilled()) {
             Long bestPrice = makerBook.getBestPrice();
-
-            if (taker.getSide() == OrderSide.BUY && taker.getPrice() < bestPrice) break;
-            if (taker.getSide() == OrderSide.SELL && taker.getPrice() > bestPrice) break;
-
-            LinkedList<Order> ordersAtPrice = makerBook.getOrdersAtBestPrice();
-
-            while (ordersAtPrice != null && !ordersAtPrice.isEmpty() && !taker.isFilled()) {
-                Order maker = ordersAtPrice.peek();
-
-                // ==========================================
-                // [ZH] 🚀 墓碑清理：遇到已被撤销的僵尸订单，直接弹出并跳过
-                // [EN] 🚀 Tombstone Cleanup: Poll and skip canceled zombie orders
-                // ==========================================
-                if (maker.isCanceled()) {
-                    ordersAtPrice.poll();
-                    continue;
-                }
-
-                long tradedAmount = Math.min(taker.getRemainingAmount(), maker.getRemainingAmount());
-
-                // 1. [ZH] 执行内存状态扣减 / [EN] Execute memory state deduction
-                taker.fill(tradedAmount);
-                maker.fill(tradedAmount);
-
-                // 2. [ZH] 调用账务系统进行结算 / [EN] Call BalanceManager for settlement
-                // [ZH] 核心：买家和卖家的角色由 taker/maker 的 Side 决定
-                // [EN] Core: Buyer/Seller roles determined by taker/maker Side
-                long buyerId = (taker.getSide() == OrderSide.BUY) ? taker.getUserId() : maker.getUserId();
-                long sellerId = (taker.getSide() == OrderSide.SELL) ? taker.getUserId() : maker.getUserId();
-
-                balanceManager.settle(buyerId, sellerId, baseCurrency, quoteCurrency, tradedAmount, bestPrice);
-
-                // 3. [ZH] 架构核心：结算成功后，异步广播成交结果！(绝不能在这里同步写库)
-                //    [EN] Core Arch: Async broadcast after settlement! (NEVER sync write to DB here)
-                String tradeRecord = String.format(
-                        "{\"buyerUid\": %d, \"sellerUid\": %d, \"price\": %d, \"amount\": %d}",
-                        buyerId, sellerId, bestPrice, tradedAmount
-                );
-                MockKafkaBroker.send(tradeRecord); // [ZH] 极速发送并返回 / [EN] Fire and forget
-
-                // 4. [ZH] 日志记录（生产环境应使用异步 Logger） / [EN] Logging (use async logger in production)
-                log.info("TRADE: {} matched with {}, Amount: {}, Price: {}",
-                        taker.getOrderId(), maker.getOrderId(), tradedAmount, bestPrice);
-
-                if (maker.isFilled()) {
-                    ordersAtPrice.poll();
-                    // [ZH] 极其重要：订单完全成交后，必须从全局哈希索引中移除，防止内存泄漏 (OOM)
-                    // [EN] Crucial: Remove from global hash index after full fill to prevent memory leak (OOM)
-                    orderIndex.remove(maker.getOrderId());
-                }
+            if (bestPrice == null || !isPriceMatch(taker, bestPrice)) {
+                break;
             }
 
-            if (ordersAtPrice == null || ordersAtPrice.isEmpty()) {
-                makerBook.removeBestPrice();
+            PriceLevel bestLevel = makerBook.getBestLevel();
+            while (bestLevel != null && bestLevel.getHead() != null && !taker.isFilled()) {
+                OrderNode makerNode = bestLevel.getHead();
+                long tradedQty = Math.min(taker.getRemainingAmount(), makerNode.getRemainingQty());
+
+                taker.fill(tradedQty);
+                makerNode.fill(tradedQty);
+
+                TradeEvent tradeEvent = buildTradeEvent(taker, makerNode, bestPrice, tradedQty);
+                accountService.settleTrade(tradeEvent);
+
+                log.info("TRADE: taker={} maker={} amount={} price={}",
+                        taker.getOrderId(), makerNode.getOrderId(), tradedQty, bestPrice);
+
+                if (makerNode.isFilled()) {
+                    makerBook.removeNode(makerNode);
+                    orderMap.remove(makerNode.getOrderId());
+                }
+
+                bestLevel = makerBook.getBestLevel();
             }
         }
+    }
+
+    private boolean isPriceMatch(Order taker, long bestPrice) {
+        if (taker.getSide() == OrderSide.BUY) {
+            return taker.getPrice() >= bestPrice;
+        }
+        return taker.getPrice() <= bestPrice;
+    }
+
+    private TradeEvent buildTradeEvent(Order taker, OrderNode makerNode, long tradePrice, long tradedQty) {
+        long buyerId = taker.getSide() == OrderSide.BUY ? taker.getUserId() : makerNode.getOrder().getUserId();
+        long sellerId = taker.getSide() == OrderSide.SELL ? taker.getUserId() : makerNode.getOrder().getUserId();
+
+        return new TradeEvent(
+                makerNode.getOrderId(),
+                taker.getOrderId(),
+                buyerId,
+                sellerId,
+                tradePrice,
+                tradedQty,
+                makerNode.getRemainingQty(),
+                taker.getRemainingAmount(),
+                makerNode.getStatus(),
+                taker.getStatus()
+        );
     }
 
     private void addLimitOrder(Order order) {
-        if (order.getSide() == OrderSide.BUY) {
-            bids.addOrder(order);
-        } else {
-            asks.addOrder(order);
-        }
-        // [ZH] 挂单存入全局哈希表，用于后续 O(1) 撤单定位
-        // [EN] Store maker order in global hash map for subsequent O(1) cancel positioning
-        orderIndex.put(order.getOrderId(), order);
+        OrderNode node = new OrderNode(order);
+        getBook(order.getSide()).addOrder(node);
+        orderMap.put(order.getOrderId(), node);
     }
 
-    // ==========================================
-    // [ZH] 系统快照与恢复支持接口
-    // [EN] System Snapshot and Recovery Support Interfaces
-    // ==========================================
+    private OrderBook getBook(OrderSide side) {
+        return side == OrderSide.BUY ? bids : asks;
+    }
 
-    /**
-     * [ZH] 获取当前引擎中所有存活的订单集合，用于生成二进制快照。
-     * [ZH] 警告：此方法返回的是底层数据结构的只读/直接视图，严禁在 Disruptor 消费者线程之外调用，以防破坏无锁并发安全！
-     * [EN] Get a collection of all active orders in the current engine for binary snapshot generation.
-     * [EN] WARNING: Returns a read-only/direct view of underlying data. Strictly forbid calling outside the Disruptor consumer thread to prevent breaking lock-free thread safety!
-     *
-     * @return [ZH] 活跃订单集合 / [EN] Collection of active orders
-     */
     public Collection<Order> getActiveOrders() {
-        // [ZH] 假设你的底层全局索引是 orderIndex
-        // [EN] Assuming your underlying global index is orderIndex
-        if (this.orderIndex == null) {
-            return java.util.Collections.emptyList();
+        if (orderMap == null) {
+            return Collections.emptyList();
         }
 
-        // [ZH] 直接返回 values()，避免内存拷贝开销。
-        // [ZH] 安全性由 Disruptor 的单线程消费模型 (Thread Confinement) 保证。
-        // [EN] Return values() directly to avoid memory copy overhead.
-        // [EN] Safety is guaranteed by Disruptor's single-threaded consumer model (Thread Confinement).
-        return this.orderIndex.values();
+        List<Order> activeOrders = new ArrayList<>(orderMap.size());
+        for (OrderNode node : orderMap.values()) {
+            activeOrders.add(node.getOrder());
+        }
+        return activeOrders;
     }
 
-    /**
-     * [ZH] 毁灭并重生：系统重启时，通过二进制快照瞬间覆盖内存状态，并重建价格深度树
-     * [EN] Destroy and Rebirth: Instantly overwrite memory state via binary snapshot on restart, and rebuild depth trees
-     *
-     * @param snapshotOrders [ZH] 从 bin 文件中反序列化出的订单集合 / [EN] Orders deserialized from bin file
-     */
     public void restoreFromSnapshot(Map<Long, Order> snapshotOrders) {
         log.warn("[Engine] HALT! Replacing memory state with snapshot base...");
         long startTime = System.currentTimeMillis();
 
-        // 1. [ZH] O(1) 覆盖全局哈希索引
-        // 1. [EN] O(1) Overwrite global hash index
-        this.orderIndex = snapshotOrders;
-
-        // 2. [ZH] 实例化全新的买卖盘
-        // 2. [EN] Instantiate fresh bid/ask order books
         this.bids = new OrderBook(OrderSide.BUY);
         this.asks = new OrderBook(OrderSide.SELL);
+        this.orderMap = new HashMap<>();
 
-        // 3. [ZH] 重建价格深度树 (OrderBook)
-        // [EN] Rebuild Price Depth Tree (OrderBook)
         for (Order order : snapshotOrders.values()) {
-            // [ZH] 过滤掉可能的脏数据，仅将有效挂单塞回红黑树/跳表
-            // [EN] Filter dirty data, only push valid maker orders back to RB-Tree/SkipList
+            if (order.getStatus() == null) {
+                order.setStatus(order.isCanceled() ? OrderStatus.CANCELED : OrderStatus.NEW);
+            }
+
             if (!order.isCanceled() && !order.isFilled()) {
-                if (order.getSide() == OrderSide.BUY) {
-                    this.bids.addOrder(order);
-                } else {
-                    this.asks.addOrder(order);
-                }
+                addLimitOrder(order);
             }
         }
 
         long timeTaken = System.currentTimeMillis() - startTime;
-        log.warn("[Engine] Snapshot memory injection complete! Rebuilt {} orders in {} ms.", snapshotOrders.size(), timeTaken);
+        log.warn("[Engine] Snapshot memory injection complete! Rebuilt {} orders in {} ms.", orderMap.size(), timeTaken);
+    }
+
+    // [ZH] 只读调试接口，服务于第一阶段行为测试
+    // [EN] Read-only inspection helpers used by the phase-1 behavior tests
+    public Long getBestBidPrice() {
+        return bids.getBestPrice();
+    }
+
+    public Long getBestAskPrice() {
+        return asks.getBestPrice();
+    }
+
+    public Order findActiveOrder(long orderId) {
+        OrderNode node = orderMap.get(orderId);
+        return node == null ? null : node.getOrder();
+    }
+
+    public boolean hasActiveOrder(long orderId) {
+        return orderMap.containsKey(orderId);
+    }
+
+    public List<Long> getOrderIdsAtPrice(OrderSide side, long price) {
+        return getBook(side).getOrderIdsAtPrice(price);
+    }
+
+    public int getActiveOrderCount() {
+        return orderMap.size();
+    }
+
+    public int getBaseCurrency() {
+        return baseCurrency;
+    }
+
+    public int getQuoteCurrency() {
+        return quoteCurrency;
     }
 }

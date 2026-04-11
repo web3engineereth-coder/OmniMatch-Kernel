@@ -38,6 +38,10 @@ public class Order {
     // [EN] Remaining amount to be filled
     private long remainingAmount;
 
+    // [ZH] 订单状态
+    // [EN] Order lifecycle status
+    private OrderStatus status = OrderStatus.NEW;
+
     // [ZH] 纳秒级时间戳，保证“时间优先”原则
     // [EN] Nanosecond timestamp to ensure "Time Priority" principle
     private long timestamp;
@@ -72,13 +76,14 @@ public class Order {
         this.price = price;
         this.originalAmount = amount;
         this.remainingAmount = amount;
+        this.status = OrderStatus.NEW;
         this.timestamp = System.nanoTime();
     }
 
     // [ZH] 判断订单是否已经完全成交
     // [EN] Check if the order has been completely filled
     public boolean isFilled() {
-        return remainingAmount <= 0;
+        return status == OrderStatus.FILLED || remainingAmount <= 0;
     }
 
     // [ZH] 执行成交扣减逻辑
@@ -92,6 +97,11 @@ public class Order {
             throw new IllegalStateException("Traded amount exceeds remaining amount.");
         }
         this.remainingAmount -= tradedAmount;
+        if (remainingAmount == 0) {
+            this.status = OrderStatus.FILLED;
+        } else {
+            this.status = OrderStatus.PARTIALLY_FILLED;
+        }
     }
 
     // [ZH] 安全计算本次成交的总价值（单价 * 数量）
@@ -110,6 +120,7 @@ public class Order {
     // [EN] Execute cancellation operation
     public void cancel() {
         this.isCanceled = true;
+        this.status = OrderStatus.CANCELED;
         // [ZH] 极其重要的安全防线：强制将剩余数量归零。
         // [ZH] 这样即使它作为"僵尸节点"在被清理前被其他指针意外访问，其可撮合量也是 0，绝对不会引发资损。
         // [EN] Crucial safety net: Force remaining amount to zero.

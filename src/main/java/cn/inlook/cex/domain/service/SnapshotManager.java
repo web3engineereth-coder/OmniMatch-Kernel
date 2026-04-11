@@ -2,6 +2,7 @@ package cn.inlook.cex.domain.service;
 
 import cn.inlook.cex.domain.model.Order;
 import cn.inlook.cex.domain.model.OrderSide;
+import cn.inlook.cex.domain.model.OrderStatus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -52,6 +53,7 @@ public class SnapshotManager {
                 dos.writeLong(order.getRemainingAmount());
                 dos.writeLong(order.getTimestamp());
                 dos.writeBoolean(order.isCanceled());
+                dos.writeByte(order.getStatus().ordinal());
             }
 
             dos.flush();
@@ -103,6 +105,8 @@ public class SnapshotManager {
                 order.setTimestamp(dis.readLong());
 
                 boolean isCanceled = dis.readBoolean();
+                int statusOrdinal = dis.readByte();
+                order.setStatus(OrderStatus.values()[statusOrdinal]);
                 if (isCanceled) {
                     order.cancel();
                 }

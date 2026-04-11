@@ -17,6 +17,10 @@ public class JournalEventHandler implements EventHandler<OrderEvent> {
 
     @Override
     public void onEvent(OrderEvent event, long sequence, boolean endOfBatch) {
+        if (event.getEventType() != DisruptorEventType.PLACE_ORDER || event.getOrder() == null) {
+            return;
+        }
+
         // [ZH] 🚀 打印当前执行记账逻辑的物理线程名称 (已修复文案)
         // [EN] 🚀 Log the physical thread name executing the journaling logic (Text fixed)
         log.info("[Journaler] 当前记账线程 / Current Journal Thread: {} | Seq: {} | OrderID: {}",

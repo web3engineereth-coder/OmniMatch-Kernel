@@ -1,6 +1,5 @@
 package cn.inlook.cex.infrastructure.disruptor;
 
-import cn.inlook.cex.domain.model.Order;
 import cn.inlook.cex.domain.service.MatchingEngine;
 import cn.inlook.cex.domain.service.SnapshotManager;
 import com.lmax.disruptor.EventHandler;
@@ -14,11 +13,7 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 public class MatchingEventHandler implements EventHandler<OrderEvent> {
 
-    private final MatchingEngine engine;
-
-    // [ZH] 注入二进制快照管理器
-    // [EN] Inject binary snapshot manager
-    private final SnapshotManager snapshotManager;
+    private final CommandRouter commandRouter;
 
     // ==========================================
     // [ZH] 🚀 核心：手动维护消费进度序列，初始值为 -1
@@ -29,8 +24,11 @@ public class MatchingEventHandler implements EventHandler<OrderEvent> {
     private final Sequence sequence = new Sequence(-1);
 
     public MatchingEventHandler(MatchingEngine engine) {
-        this.engine = engine;
-        this.snapshotManager = new SnapshotManager();
+        this(new DefaultCommandRouter(engine, new SnapshotManager()));
+    }
+
+    public MatchingEventHandler(CommandRouter commandRouter) {
+        this.commandRouter = commandRouter;
     }
 
     /**
@@ -64,26 +62,7 @@ public class MatchingEventHandler implements EventHandler<OrderEvent> {
             // [ZH] 指令路由分发
             // [EN] Command routing dispatch
             // ==========================================
-            if (event.getEventType() == DisruptorEventType.PLACE_ORDER) {
-                Order incomingOrder = event.getOrder();
-                if (incomingOrder != null) {
-                    engine.processOrder(incomingOrder);
-                }
-            } else if (event.getEventType() == DisruptorEventType.CANCEL_ORDER) {
-                // [ZH] 执行 O(1) 极限撤单
-                // [EN] Execute O(1) extreme cancellation
-                engine.cancelOrder(event.getCancelOrderId());
-            } else if (event.getEventType() == DisruptorEventType.MAKE_SNAPSHOT) {
-                // ==========================================
-                // [ZH] 🚀 触发内存级物理快照
-                // [ZH] 此时消费者线程被独占，处于 Stop-The-World 状态，数据绝对一致
-                // [EN] 🚀 Trigger memory-level physical snapshot
-                // [EN] Consumer thread is exclusively occupied (Stop-The-World), data is absolutely consistent
-                // ==========================================
-                log.info("[Matcher] Snapshot command received at sequence: {}. Halting engine to dump memory...", sequence);
-                snapshotManager.saveSnapshot(engine.getActiveOrders());
-                log.info("[Matcher] Snapshot dump completed. Resuming matching engine...");
-            }
+            commandRouter.route(event, sequence);
 
         } catch (Exception e) {
             log.error("Fatal error during matching process at seq {}: ", sequence, e);
