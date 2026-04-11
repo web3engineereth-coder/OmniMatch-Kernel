@@ -75,9 +75,9 @@ public class MatchingEngine {
             return;
         }
 
+        accountService.releaseOnCancel(node.getOrder());
         node.cancel();
         getBook(node.getSide()).removeNode(node);
-        accountService.releaseOnCancel(node.getOrder());
         log.info("Order {} canceled and detached from price level {}.", orderId, node.getPrice());
     }
 
