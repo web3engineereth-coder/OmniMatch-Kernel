@@ -15,6 +15,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -61,6 +62,8 @@ class MatchingEngineAccountLifecycleTest {
 
         assertEquals(500L, sellerFinal.getAvailableCash());
         assertEquals(5L, sellerFinal.getAvailableAsset());
+        assertNotEquals(10L, sellerFinal.getAvailableAsset(),
+                "Cancel must release only the remaining 5 asset units, not the full original order.");
         assertEquals(0L, sellerFinal.getFrozenAsset());
 
         assertEquals(500L, buyerFinal.getAvailableCash());
@@ -72,6 +75,7 @@ class MatchingEngineAccountLifecycleTest {
         assertEquals(List.of(), engine.getOrderIdsAtPrice(OrderSide.SELL, 100L));
         assertNull(engine.getBestAskPrice());
         assertEquals(0, engine.getActiveOrderCount());
+        engine.assertInvariant();
 
         TradeEvent tradeEvent = publisher.events.get(0);
         assertEquals(1L, tradeEvent.getMakerOrderId());

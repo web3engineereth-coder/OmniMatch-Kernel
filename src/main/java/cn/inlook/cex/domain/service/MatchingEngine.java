@@ -231,9 +231,13 @@ public class MatchingEngine {
 
         Order order = node.getOrder();
         long remainingQuantity = order.getRemainingAmount();
+        OrderBook book = getBook(node.getSide());
+
+        // [ZH] 撤单释放必须基于仍然保留的 remainingAmount 计算，因此顺序固定为 release -> cancel -> remove
+        // [EN] Cancel release must use the still-intact remainingAmount, so the order is fixed as release -> cancel -> remove
         accountService.releaseOnCancel(order);
         node.cancel();
-        getBook(node.getSide()).removeNode(node);
+        book.removeNode(node);
         orderCanceledEventPublisher.publish(new OrderCanceledEvent(
                 order.getSymbol(),
                 order.getOrderId(),
