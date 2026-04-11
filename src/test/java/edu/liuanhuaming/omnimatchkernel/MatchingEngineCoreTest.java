@@ -34,6 +34,20 @@ public class MatchingEngineCoreTest {
     }
 
     @Test
+    void shouldMaintainBestBidAndBestAskAcrossMultiplePriceLevels() {
+        engine.processOrder(new Order(1L, 101L, OrderSide.BUY, 99L, 5L));
+        engine.processOrder(new Order(2L, 102L, OrderSide.BUY, 101L, 5L));
+        engine.processOrder(new Order(3L, 103L, OrderSide.BUY, 100L, 5L));
+
+        engine.processOrder(new Order(4L, 201L, OrderSide.SELL, 105L, 5L));
+        engine.processOrder(new Order(5L, 202L, OrderSide.SELL, 103L, 5L));
+        engine.processOrder(new Order(6L, 203L, OrderSide.SELL, 104L, 5L));
+
+        assertEquals(101L, engine.getBestBidPrice());
+        assertEquals(103L, engine.getBestAskPrice());
+    }
+
+    @Test
     void shouldCancelMiddleNodeThroughOrderMapPath() {
         engine.processOrder(new Order(1L, 101L, OrderSide.BUY, 100L, 10L));
         engine.processOrder(new Order(2L, 102L, OrderSide.BUY, 100L, 10L));
@@ -47,28 +61,43 @@ public class MatchingEngineCoreTest {
     }
 
     @Test
-    void shouldKeepMakerPositionOnPartialFill() {
-        engine.processOrder(new Order(1L, 101L, OrderSide.BUY, 100L, 10L));
-        engine.processOrder(new Order(2L, 201L, OrderSide.SELL, 100L, 4L));
+    void shouldPreserveFifoWithinSamePriceLevel() {
+        engine.processOrder(new Order(1L, 201L, OrderSide.SELL, 100L, 5L));
+        engine.processOrder(new Order(2L, 202L, OrderSide.SELL, 100L, 5L));
+        engine.processOrder(new Order(3L, 101L, OrderSide.BUY, 100L, 5L));
+
+        TradeEvent publishedEvent = tradeEventPublisher.tradeEvents.get(0);
+        assertEquals(1L, publishedEvent.getMakerOrderId());
+        assertFalse(engine.hasActiveOrder(1L));
+        assertTrue(engine.hasActiveOrder(2L));
+        assertEquals(List.of(2L), engine.getOrderIdsAtPrice(OrderSide.SELL, 100L));
+    }
+
+    @Test
+    void shouldKeepPartiallyFilledNodeAtHeadOfSamePriceLevel() {
+        engine.processOrder(new Order(1L, 201L, OrderSide.SELL, 100L, 10L));
+        engine.processOrder(new Order(2L, 202L, OrderSide.SELL, 100L, 5L));
+        engine.processOrder(new Order(3L, 101L, OrderSide.BUY, 100L, 5L));
 
         Order restingOrder = engine.findActiveOrder(1L);
         TradeEvent publishedEvent = tradeEventPublisher.tradeEvents.get(0);
-        assertEquals(6L, restingOrder.getRemainingAmount());
+        assertEquals(5L, restingOrder.getRemainingAmount());
         assertEquals(OrderStatus.PARTIALLY_FILLED, restingOrder.getStatus());
-        assertEquals(List.of(1L), engine.getOrderIdsAtPrice(OrderSide.BUY, 100L));
+        assertEquals(List.of(1L, 2L), engine.getOrderIdsAtPrice(OrderSide.SELL, 100L));
+        assertEquals(100L, engine.getBestAskPrice());
         assertEquals(1, accountService.tradeEvents.size());
         assertEquals(1, tradeEventPublisher.tradeEvents.size());
         assertEquals(1L, publishedEvent.getMakerOrderId());
-        assertEquals(2L, publishedEvent.getTakerOrderId());
-        assertEquals(4L, publishedEvent.getQuantity());
+        assertEquals(3L, publishedEvent.getTakerOrderId());
+        assertEquals(5L, publishedEvent.getQuantity());
         assertEquals(100L, publishedEvent.getPrice());
-        assertEquals(6L, publishedEvent.getMakerRemainingQty());
+        assertEquals(5L, publishedEvent.getMakerRemainingQty());
         assertEquals(OrderStatus.PARTIALLY_FILLED, publishedEvent.getMakerStatus());
         assertEquals(OrderStatus.FILLED, publishedEvent.getTakerStatus());
     }
 
     @Test
-    void shouldRemoveFilledNodeAndClearEmptyPriceLevel() {
+    void shouldUpdateBestBidAfterTopLevelIsFullyMatched() {
         engine.processOrder(new Order(1L, 101L, OrderSide.BUY, 101L, 5L));
         engine.processOrder(new Order(2L, 102L, OrderSide.BUY, 100L, 5L));
 
@@ -80,17 +109,15 @@ public class MatchingEngineCoreTest {
     }
 
     @Test
-    void shouldUpdateBestPricesAcrossBothSides() {
-        engine.processOrder(new Order(1L, 101L, OrderSide.SELL, 105L, 10L));
-        engine.processOrder(new Order(2L, 102L, OrderSide.SELL, 103L, 10L));
-        engine.processOrder(new Order(3L, 103L, OrderSide.BUY, 100L, 10L));
+    void shouldUpdateBestBidAfterTopLevelIsCanceled() {
+        engine.processOrder(new Order(1L, 101L, OrderSide.BUY, 101L, 5L));
+        engine.processOrder(new Order(2L, 102L, OrderSide.BUY, 100L, 5L));
 
-        assertEquals(103L, engine.getBestAskPrice());
+        engine.cancelOrder(1L);
+
+        assertFalse(engine.hasActiveOrder(1L));
+        assertEquals(List.of(), engine.getOrderIdsAtPrice(OrderSide.BUY, 101L));
         assertEquals(100L, engine.getBestBidPrice());
-
-        engine.cancelOrder(2L);
-
-        assertEquals(105L, engine.getBestAskPrice());
     }
 
     @Test
