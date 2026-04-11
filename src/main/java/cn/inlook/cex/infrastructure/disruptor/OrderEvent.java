@@ -1,6 +1,8 @@
 package cn.inlook.cex.infrastructure.disruptor;
 
+import cn.inlook.cex.domain.model.CancelOrderCommand;
 import cn.inlook.cex.domain.model.Order;
+import cn.inlook.cex.domain.model.PlaceOrderCommand;
 import com.lmax.disruptor.EventFactory;
 import lombok.Getter;
 import lombok.Setter;
@@ -19,16 +21,26 @@ public class OrderEvent {
     // [EN] For PLACE_ORDER: The actual new order to be processed
     private Order order;
 
+    // [ZH] 针对 PLACE_ORDER：标准化命令模型
+    // [EN] For PLACE_ORDER: Standardized command model
+    private PlaceOrderCommand placeOrderCommand;
+
     // [ZH] 针对 CANCEL_ORDER：需要被 O(1) 极限撤销的订单 ID
     // [EN] For CANCEL_ORDER: The target order ID to be canceled via O(1)
     private long cancelOrderId;
+
+    // [ZH] 针对 CANCEL_ORDER：标准化命令模型
+    // [EN] For CANCEL_ORDER: Standardized command model
+    private CancelOrderCommand cancelOrderCommand;
 
     // [ZH] 清空引用，防止内存泄漏与脏数据污染
     // [EN] Clear references to prevent memory leaks and dirty data pollution
     public void clear() {
         this.eventType = null;
         this.order = null;
+        this.placeOrderCommand = null;
         this.cancelOrderId = 0L;
+        this.cancelOrderCommand = null;
     }
 
     // [ZH] 事件工厂，实现 Zero-GC

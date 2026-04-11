@@ -45,10 +45,18 @@ public class MatchingEventHandler implements EventHandler<OrderEvent> {
             // [ZH] 提取目标 ID 用于日志 (仅在 DEBUG/INFO 级别有效)
             // [EN] Extract target ID for logging
             long targetOrderId = -1;
-            if (event.getEventType() == DisruptorEventType.PLACE_ORDER && event.getOrder() != null) {
-                targetOrderId = event.getOrder().getOrderId();
+            if (event.getEventType() == DisruptorEventType.PLACE_ORDER) {
+                if (event.getPlaceOrderCommand() != null) {
+                    targetOrderId = event.getPlaceOrderCommand().getOrderId();
+                } else if (event.getOrder() != null) {
+                    targetOrderId = event.getOrder().getOrderId();
+                }
             } else if (event.getEventType() == DisruptorEventType.CANCEL_ORDER) {
-                targetOrderId = event.getCancelOrderId();
+                if (event.getCancelOrderCommand() != null) {
+                    targetOrderId = event.getCancelOrderCommand().getOrderId();
+                } else {
+                    targetOrderId = event.getCancelOrderId();
+                }
             }
 
             // [ZH] 注意：压测时请务必关闭此日志，否则 TPS 会被 I/O 卡死

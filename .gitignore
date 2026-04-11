@@ -61,3 +61,5 @@ hs_err_pid*
 demo.*
 
 .DS_Store
+AGENTS.md
+*.bin
