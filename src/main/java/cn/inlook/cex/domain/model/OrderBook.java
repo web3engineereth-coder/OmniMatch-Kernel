@@ -52,6 +52,12 @@ public class OrderBook {
         return bestPrice == null ? null : levels.get(bestPrice);
     }
 
+    // [ZH] 只读返回当前订单簿中的价格档位，供调试/自检使用
+    // [EN] Read-only snapshot of the current price levels for validation/debugging
+    public List<PriceLevel> getLevels() {
+        return new ArrayList<>(levels.values());
+    }
+
     // [ZH] 通过节点执行 O(1) 物理删除，档位空则移除
     // [EN] Perform O(1) physical removal through the node and drop the level when empty
     public void removeNode(OrderNode node) {

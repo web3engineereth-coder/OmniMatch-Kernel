@@ -13,9 +13,11 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * [ZH] 核心撮合引擎 - 单线程事件驱动，内部使用 PriceLevel + OrderNode 结构
@@ -215,5 +217,114 @@ public class MatchingEngine {
 
     public int getQuoteCurrency() {
         return quoteCurrency;
+    }
+
+    // [ZH] 开发/测试期自检：验证订单簿、价格档位与 orderMap 的关键不变量
+    // [EN] Dev/test invariant guard validating the core book, levels, and orderMap consistency
+    public void assertInvariant() {
+        assertBookInvariant(bids, OrderSide.BUY);
+        assertBookInvariant(asks, OrderSide.SELL);
+    }
+
+    private void assertBookInvariant(OrderBook book, OrderSide side) {
+        Long actualBestPrice = side == OrderSide.BUY ? getBestBidPrice() : getBestAskPrice();
+        Long expectedBestPrice = null;
+        Set<Long> bookOrderIds = new HashSet<>();
+
+        for (PriceLevel level : book.getLevels()) {
+            if (level == null) {
+                failInvariant("Encountered null price level on " + side + " side.");
+            }
+            if (level.isEmpty()) {
+                failInvariant("Empty price level must not remain in book: side=" + side + ", price=" + level.getPrice());
+            }
+
+            if (expectedBestPrice == null) {
+                expectedBestPrice = level.getPrice();
+            } else if (side == OrderSide.BUY && level.getPrice() > expectedBestPrice) {
+                expectedBestPrice = level.getPrice();
+            } else if (side == OrderSide.SELL && level.getPrice() < expectedBestPrice) {
+                expectedBestPrice = level.getPrice();
+            }
+
+            int traversedSize = 0;
+            OrderNode previous = null;
+            OrderNode current = level.getHead();
+            while (current != null) {
+                traversedSize++;
+                Order order = current.getOrder();
+
+                if (order == null) {
+                    failInvariant("Order node without backing order at price " + level.getPrice());
+                }
+                if (current.getPriceLevel() != level) {
+                    failInvariant("Order node references wrong price level for order " + current.getOrderId());
+                }
+                if (current.getSide() != side) {
+                    failInvariant("Order side does not match book side for order " + current.getOrderId());
+                }
+                if (current.getPrice() != level.getPrice()) {
+                    failInvariant("Order price does not match its price level for order " + current.getOrderId());
+                }
+                if (current.getPrev() != previous) {
+                    failInvariant("Broken previous pointer at order " + current.getOrderId());
+                }
+                if (order.getRemainingAmount() <= 0 || order.isFilled() || order.isCanceled()) {
+                    failInvariant("Inactive order remains in book: orderId=" + current.getOrderId());
+                }
+                if (!orderMap.containsKey(current.getOrderId())) {
+                    failInvariant("Book contains order missing from orderMap: orderId=" + current.getOrderId());
+                }
+                if (orderMap.get(current.getOrderId()) != current) {
+                    failInvariant("orderMap points to a different node instance for order " + current.getOrderId());
+                }
+                if (!bookOrderIds.add(current.getOrderId())) {
+                    failInvariant("Duplicate order found in book traversal: orderId=" + current.getOrderId());
+                }
+
+                previous = current;
+                current = current.getNext();
+            }
+
+            if (traversedSize != level.getSize()) {
+                failInvariant("Price level size mismatch at price " + level.getPrice() + ": size=" +
+                        level.getSize() + ", traversed=" + traversedSize);
+            }
+            if (traversedSize == 0 || level.getHead() == null || level.getTail() == null) {
+                failInvariant("Non-empty price level has broken head/tail pointers at price " + level.getPrice());
+            }
+            if (level.getHead().getPrev() != null) {
+                failInvariant("Price level head must not have prev pointer at price " + level.getPrice());
+            }
+            if (level.getTail().getNext() != null) {
+                failInvariant("Price level tail must not have next pointer at price " + level.getPrice());
+            }
+        }
+
+        if (!Objects.equals(expectedBestPrice, actualBestPrice)) {
+            failInvariant("Best price mismatch on " + side + " side: expected=" +
+                    expectedBestPrice + ", actual=" + actualBestPrice);
+        }
+
+        for (Map.Entry<Long, OrderNode> entry : orderMap.entrySet()) {
+            OrderNode node = entry.getValue();
+            if (node.getSide() != side) {
+                continue;
+            }
+            Order order = node.getOrder();
+            if (order.getRemainingAmount() <= 0 || order.isFilled() || order.isCanceled()) {
+                failInvariant("Inactive order remains in orderMap: orderId=" + entry.getKey());
+            }
+            if (node.getPriceLevel() == null) {
+                failInvariant("orderMap contains dangling node without price level: orderId=" + entry.getKey());
+            }
+            if (!bookOrderIds.contains(entry.getKey())) {
+                failInvariant("orderMap contains order missing from book: orderId=" + entry.getKey());
+            }
+        }
+    }
+
+    private void failInvariant(String message) {
+        throw new IllegalStateException("MatchingEngine invariant violation: " + message);
     }
 }
