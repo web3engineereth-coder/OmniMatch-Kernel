@@ -18,11 +18,19 @@ import java.util.Map;
 public class SnapshotManager {
 
     private static final Logger log = LoggerFactory.getLogger(SnapshotManager.class);
-    private static final String SNAPSHOT_FILE = "engine_snapshot.bin";
+    private final String snapshotFile;
 
     // [ZH] 魔数，用于校验文件类型是否正确 (类似 Java class 的 CAFEBABE)
     // [EN] Magic number for file type validation
     private static final int MAGIC_NUMBER = 0x0308CE;
+
+    public SnapshotManager() {
+        this("engine_snapshot.bin");
+    }
+
+    public SnapshotManager(String snapshotFile) {
+        this.snapshotFile = snapshotFile;
+    }
 
     /**
      * [ZH] 创建系统快照 (Dump)
@@ -35,7 +43,7 @@ public class SnapshotManager {
 
         // [ZH] 使用 DataOutputStream 配合 BufferedOutputStream 追求极致写入性能
         // [EN] Use DataOutputStream with BufferedOutputStream for extreme write performance
-        try (DataOutputStream dos = new DataOutputStream(new BufferedOutputStream(new FileOutputStream(SNAPSHOT_FILE)))) {
+        try (DataOutputStream dos = new DataOutputStream(new BufferedOutputStream(new FileOutputStream(snapshotFile)))) {
 
             // 1. [ZH] 写入文件头：魔数 + 订单总数
             // [EN] Write file header: Magic Number + Total Orders
@@ -71,7 +79,7 @@ public class SnapshotManager {
      * @return [ZH] 恢复后的订单映射表 / [EN] Restored order map
      */
     public Map<Long, Order> loadSnapshot() {
-        File file = new File(SNAPSHOT_FILE);
+        File file = new File(snapshotFile);
         if (!file.exists()) {
             log.info("[Snapshot] No existing snapshot found. Starting from scratch.");
             return new HashMap<>();

@@ -1,5 +1,6 @@
 package cn.inlook.cex;
 
+import cn.inlook.cex.domain.model.PlaceOrderCommand;
 import cn.inlook.cex.domain.model.Order;
 import cn.inlook.cex.domain.model.OrderSide;
 import cn.inlook.cex.domain.service.BalanceManager;
@@ -105,7 +106,15 @@ public class OmniMatchDisruptorApp {
                     Thread.currentThread().getName(), order.getOrderId());
 
             OrderEvent event = ringBuffer.get(sequence); // [ZH] 获取该坑位的对象 / [EN] Get object at slot
-            event.setOrder(order); // [ZH] 填充数据 / [EN] Fill data
+            event.setEventType(cn.inlook.cex.infrastructure.disruptor.DisruptorEventType.PLACE_ORDER);
+            event.setPlaceOrderCommand(new PlaceOrderCommand(
+                    order.getOrderId(),
+                    order.getUserId(),
+                    order.getSymbol(),
+                    order.getSide(),
+                    order.getPrice(),
+                    order.getRemainingAmount(),
+                    order.getTimestamp()));
         } finally {
             ringBuffer.publish(sequence); // [ZH] 提交发布 (消费者此时才能看到) / [EN] Publish (visible to consumer now)
         }

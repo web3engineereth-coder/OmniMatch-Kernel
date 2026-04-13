@@ -1,7 +1,9 @@
 package edu.liuanhuaming.omnimatchkernel;
 
+import cn.inlook.cex.domain.model.CancelOrderCommand;
 import cn.inlook.cex.domain.model.Order;
 import cn.inlook.cex.domain.model.OrderSide;
+import cn.inlook.cex.domain.model.PlaceOrderCommand;
 import cn.inlook.cex.domain.model.TradeEvent;
 import cn.inlook.cex.domain.service.AccountService;
 import cn.inlook.cex.domain.service.MatchingEngine;
@@ -145,7 +147,14 @@ class MatchingEngineConcurrentConsistencyTest {
         try {
             OrderEvent event = ringBuffer.get(sequence);
             event.setEventType(DisruptorEventType.PLACE_ORDER);
-            event.setOrder(order);
+            event.setPlaceOrderCommand(new PlaceOrderCommand(
+                    order.getOrderId(),
+                    order.getUserId(),
+                    order.getSymbol(),
+                    order.getSide(),
+                    order.getPrice(),
+                    order.getRemainingAmount(),
+                    order.getTimestamp()));
         } finally {
             ringBuffer.publish(sequence);
         }
@@ -156,7 +165,7 @@ class MatchingEngineConcurrentConsistencyTest {
         try {
             OrderEvent event = ringBuffer.get(sequence);
             event.setEventType(DisruptorEventType.CANCEL_ORDER);
-            event.setCancelOrderId(orderId);
+            event.setCancelOrderCommand(new CancelOrderCommand(orderId, 0L, System.nanoTime()));
         } finally {
             ringBuffer.publish(sequence);
         }

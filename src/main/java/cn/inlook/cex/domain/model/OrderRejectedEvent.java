@@ -5,7 +5,7 @@ import lombok.Getter;
 // [ZH] 下单或撤单被拒绝时的结构化事件
 // [EN] Structured event emitted when an order command is rejected
 @Getter
-public class OrderRejectedEvent {
+public class OrderRejectedEvent implements EngineEvent {
 
     private final String symbol;
     private final long orderId;
@@ -23,5 +23,10 @@ public class OrderRejectedEvent {
         this.userId = userId;
         this.reason = reason;
         this.timestamp = timestamp;
+    }
+
+    @Override
+    public EngineEventType getEventType() {
+        return EngineEventType.ORDER_REJECTED;
     }
 }

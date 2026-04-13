@@ -1,6 +1,7 @@
 package cn.inlook.cex.domain.service;
 
 import cn.inlook.cex.domain.model.CancelOrderCommand;
+import cn.inlook.cex.domain.model.EngineEvent;
 import cn.inlook.cex.domain.model.Order;
 import cn.inlook.cex.domain.model.OrderBook;
 import cn.inlook.cex.domain.model.OrderCanceledEvent;
@@ -37,6 +38,7 @@ public class MatchingEngine {
     private final TradeEventPublisher tradeEventPublisher;
     private final OrderCanceledEventPublisher orderCanceledEventPublisher;
     private final OrderRejectedEventPublisher orderRejectedEventPublisher;
+    private final EngineEventPublisher engineEventPublisher;
     private final boolean enableInvariantCheck;
 
     // [ZH] 全局订单节点索引，用于 O(1) 撤单
@@ -70,6 +72,10 @@ public class MatchingEngine {
                 false);
     }
 
+    public MatchingEngine(AccountService accountService, EngineEventPublisher engineEventPublisher) {
+        this(accountService, engineEventPublisher, false);
+    }
+
     public MatchingEngine(AccountService accountService,
                           TradeEventPublisher tradeEventPublisher,
                           boolean enableInvariantCheck) {
@@ -78,6 +84,19 @@ public class MatchingEngine {
                 new NoopOrderCanceledEventPublisher(),
                 new NoopOrderRejectedEventPublisher(),
                 enableInvariantCheck);
+    }
+
+    public MatchingEngine(AccountService accountService,
+                          EngineEventPublisher engineEventPublisher,
+                          boolean enableInvariantCheck) {
+        this.bids = new OrderBook(OrderSide.BUY);
+        this.asks = new OrderBook(OrderSide.SELL);
+        this.accountService = Objects.requireNonNull(accountService, "accountService");
+        this.tradeEventPublisher = new NoopTradeEventPublisher();
+        this.orderCanceledEventPublisher = new NoopOrderCanceledEventPublisher();
+        this.orderRejectedEventPublisher = new NoopOrderRejectedEventPublisher();
+        this.engineEventPublisher = Objects.requireNonNull(engineEventPublisher, "engineEventPublisher");
+        this.enableInvariantCheck = enableInvariantCheck;
     }
 
     public MatchingEngine(AccountService accountService,
@@ -102,6 +121,11 @@ public class MatchingEngine {
         this.tradeEventPublisher = Objects.requireNonNull(tradeEventPublisher, "tradeEventPublisher");
         this.orderCanceledEventPublisher = Objects.requireNonNull(orderCanceledEventPublisher, "orderCanceledEventPublisher");
         this.orderRejectedEventPublisher = Objects.requireNonNull(orderRejectedEventPublisher, "orderRejectedEventPublisher");
+        this.engineEventPublisher = new DispatchingEngineEventPublisher(
+                this.tradeEventPublisher,
+                this.orderCanceledEventPublisher,
+                this.orderRejectedEventPublisher
+        );
         this.enableInvariantCheck = enableInvariantCheck;
     }
 
@@ -171,7 +195,7 @@ public class MatchingEngine {
 
                 // [ZH] 成交副作用通过发布边界输出，撮合核心本身不直接记录成交日志
                 // [EN] Trade side effects leave through the publication boundary, not direct core logging
-                tradeEventPublisher.publish(tradeEvent);
+                publishEngineEvent(tradeEvent);
 
                 if (makerNode.isFilled()) {
                     makerBook.removeNode(makerNode);
@@ -195,6 +219,7 @@ public class MatchingEngine {
         long sellerId = taker.getSide() == OrderSide.SELL ? taker.getUserId() : makerNode.getOrder().getUserId();
 
         return new TradeEvent(
+                taker.getSymbol(),
                 makerNode.getOrderId(),
                 taker.getOrderId(),
                 buyerId,
@@ -204,7 +229,8 @@ public class MatchingEngine {
                 makerNode.getRemainingQty(),
                 taker.getRemainingAmount(),
                 makerNode.getStatus(),
-                taker.getStatus()
+                taker.getStatus(),
+                System.nanoTime()
         );
     }
 
@@ -238,7 +264,7 @@ public class MatchingEngine {
         accountService.releaseOnCancel(order);
         node.cancel();
         book.removeNode(node);
-        orderCanceledEventPublisher.publish(new OrderCanceledEvent(
+        publishEngineEvent(new OrderCanceledEvent(
                 order.getSymbol(),
                 order.getOrderId(),
                 order.getUserId(),
@@ -439,7 +465,11 @@ public class MatchingEngine {
                                       long userId,
                                       OrderRejectReason reason,
                                       long timestamp) {
-        orderRejectedEventPublisher.publish(new OrderRejectedEvent(symbol, orderId, userId, reason, timestamp));
+        publishEngineEvent(new OrderRejectedEvent(symbol, orderId, userId, reason, timestamp));
+    }
+
+    private void publishEngineEvent(EngineEvent event) {
+        engineEventPublisher.publish(event);
     }
 
     private void runInvariantCheckIfEnabled() {

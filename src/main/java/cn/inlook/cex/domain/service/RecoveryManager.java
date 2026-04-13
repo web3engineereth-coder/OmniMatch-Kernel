@@ -1,10 +1,13 @@
 package cn.inlook.cex.domain.service;
 
+import cn.inlook.cex.domain.model.CancelOrderCommand;
 import cn.inlook.cex.domain.model.Order;
+import cn.inlook.cex.domain.model.PlaceOrderCommand;
+import cn.inlook.cex.infrastructure.journal.CommandJournalWriter;
 import cn.inlook.cex.infrastructure.disruptor.DisruptorEventType;
 import com.alibaba.fastjson2.JSON;
-import com.alibaba.fastjson2.JSONObject;
 import com.alibaba.fastjson2.JSONException;
+import com.alibaba.fastjson2.JSONObject;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.BufferedReader;
@@ -21,7 +24,7 @@ import java.util.Map;
 @Slf4j
 public class RecoveryManager {
 
-    private final String journalPath = "trade_journal_zerocopy.log";
+    private final String journalPath;
 
     // [ZH] 🚀 核心改动 1：不再传入 RingBuffer，而是直接持有引擎的引用
     // [EN] 🚀 Core Change 1: Hold Engine reference directly instead of RingBuffer
@@ -29,8 +32,13 @@ public class RecoveryManager {
     private final SnapshotManager snapshotManager;
 
     public RecoveryManager(MatchingEngine engine) {
+        this(engine, new SnapshotManager(), CommandJournalWriter.DEFAULT_JOURNAL_PATH);
+    }
+
+    public RecoveryManager(MatchingEngine engine, SnapshotManager snapshotManager, String journalPath) {
         this.engine = engine;
-        this.snapshotManager = new SnapshotManager();
+        this.snapshotManager = snapshotManager;
+        this.journalPath = journalPath;
     }
 
     /**
@@ -105,12 +113,22 @@ public class RecoveryManager {
 
                     // [ZH] 🚀 核心改动 3：绕过 RingBuffer，以单线程最高速度直接向引擎下达指令
                     if (type == DisruptorEventType.PLACE_ORDER) {
-                        Order order = packet.getObject("data", Order.class);
-                        engine.processOrder(order); // 直连！
+                        PlaceOrderCommand placeOrderCommand = parsePlaceOrderCommand(packet);
+                        if (placeOrderCommand != null) {
+                            engine.handle(placeOrderCommand);
+                        } else {
+                            Order order = packet.getObject("data", Order.class);
+                            engine.processOrder(order); // 兼容旧日志格式
+                        }
                         commandCount++;
                     } else if (type == DisruptorEventType.CANCEL_ORDER) {
-                        long cancelOrderId = packet.getLongValue("data");
-                        engine.cancelOrder(cancelOrderId); // 直连！
+                        CancelOrderCommand cancelOrderCommand = parseCancelOrderCommand(packet);
+                        if (cancelOrderCommand != null) {
+                            engine.handle(cancelOrderCommand);
+                        } else {
+                            long cancelOrderId = packet.getLongValue("data");
+                            engine.cancelOrder(cancelOrderId); // 兼容旧日志格式
+                        }
                         commandCount++;
                     }
 
@@ -136,5 +154,36 @@ public class RecoveryManager {
             log.info(" - Replay Speed:    {} ops/sec", String.format("%.2f", (commandCount * 1000.0) / duration));
         }
         log.info("=====================================================");
+    }
+
+    private PlaceOrderCommand parsePlaceOrderCommand(JSONObject packet) {
+        JSONObject command = packet.getJSONObject("placeOrderCommand");
+        if (command == null) {
+            return null;
+        }
+
+        return new PlaceOrderCommand(
+                command.getLongValue("orderId"),
+                command.getLongValue("userId"),
+                command.getString("symbol"),
+                cn.inlook.cex.domain.model.OrderSide.valueOf(command.getString("side")),
+                command.getLongValue("price"),
+                command.getLongValue("quantity"),
+                command.getLongValue("timestamp")
+        );
+    }
+
+    private CancelOrderCommand parseCancelOrderCommand(JSONObject packet) {
+        JSONObject command = packet.getJSONObject("cancelOrderCommand");
+        if (command == null) {
+            return null;
+        }
+
+        return new CancelOrderCommand(
+                command.getString("symbol"),
+                command.getLongValue("orderId"),
+                command.getLongValue("userId"),
+                command.getLongValue("timestamp")
+        );
     }
 }

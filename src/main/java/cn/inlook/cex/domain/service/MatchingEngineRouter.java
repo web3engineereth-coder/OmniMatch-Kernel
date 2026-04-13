@@ -1,6 +1,8 @@
 package cn.inlook.cex.domain.service;
 
 import cn.inlook.cex.domain.model.CancelOrderCommand;
+import cn.inlook.cex.domain.model.OrderRejectedEvent;
+import cn.inlook.cex.domain.model.OrderRejectReason;
 import cn.inlook.cex.domain.model.Order;
 import cn.inlook.cex.domain.model.OrderSide;
 import cn.inlook.cex.domain.model.PlaceOrderCommand;
@@ -16,6 +18,7 @@ public class MatchingEngineRouter {
     private final TradeEventPublisher tradeEventPublisher;
     private final OrderCanceledEventPublisher orderCanceledEventPublisher;
     private final OrderRejectedEventPublisher orderRejectedEventPublisher;
+    private final EngineEventPublisher engineEventPublisher;
     private final boolean enableInvariantCheck;
     private final Map<String, MatchingEngine> engines = new ConcurrentHashMap<>();
 
@@ -57,6 +60,11 @@ public class MatchingEngineRouter {
         this.tradeEventPublisher = tradeEventPublisher;
         this.orderCanceledEventPublisher = orderCanceledEventPublisher;
         this.orderRejectedEventPublisher = orderRejectedEventPublisher;
+        this.engineEventPublisher = new DispatchingEngineEventPublisher(
+                this.tradeEventPublisher,
+                this.orderCanceledEventPublisher,
+                this.orderRejectedEventPublisher
+        );
         this.enableInvariantCheck = enableInvariantCheck;
     }
 
@@ -67,11 +75,11 @@ public class MatchingEngineRouter {
     public void handle(CancelOrderCommand command) {
         MatchingEngine engine = engines.get(requiredSymbol(command.getSymbol()));
         if (engine == null) {
-            orderRejectedEventPublisher.publish(new cn.inlook.cex.domain.model.OrderRejectedEvent(
+            engineEventPublisher.publish(new OrderRejectedEvent(
                     command.getSymbol(),
                     command.getOrderId(),
                     command.getUserId(),
-                    cn.inlook.cex.domain.model.OrderRejectReason.ORDER_NOT_FOUND,
+                    OrderRejectReason.ORDER_NOT_FOUND,
                     command.getTimestamp()));
             return;
         }
@@ -121,12 +129,7 @@ public class MatchingEngineRouter {
 
     private MatchingEngine resolveEngine(String symbol) {
         return engines.computeIfAbsent(symbol, ignored ->
-                new MatchingEngine(
-                        accountService,
-                        tradeEventPublisher,
-                        orderCanceledEventPublisher,
-                        orderRejectedEventPublisher,
-                        enableInvariantCheck));
+                new MatchingEngine(accountService, engineEventPublisher, enableInvariantCheck));
     }
 
     private String requiredSymbol(String symbol) {

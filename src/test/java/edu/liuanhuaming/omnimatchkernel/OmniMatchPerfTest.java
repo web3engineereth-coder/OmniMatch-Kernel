@@ -1,12 +1,15 @@
 package edu.liuanhuaming.omnimatchkernel;
 
+import cn.inlook.cex.domain.model.CancelOrderCommand;
 import cn.inlook.cex.domain.model.Order;
 import cn.inlook.cex.domain.model.OrderSide;
+import cn.inlook.cex.domain.model.PlaceOrderCommand;
 import cn.inlook.cex.domain.service.BalanceManager;
 import cn.inlook.cex.domain.service.MatchingEngine;
 import cn.inlook.cex.infrastructure.disruptor.DisruptorEventType;
 import cn.inlook.cex.infrastructure.disruptor.MatchingEventHandler;
 import cn.inlook.cex.infrastructure.disruptor.OrderEvent;
+import cn.inlook.cex.infrastructure.journal.CommandJournalEntry;
 import cn.inlook.cex.infrastructure.mq.MockKafkaBroker;
 import com.lmax.disruptor.RingBuffer;
 import com.lmax.disruptor.YieldingWaitStrategy;
@@ -73,17 +76,26 @@ public class OmniMatchPerfTest {
                 Map<String, Object> commandPacket = new HashMap<>();
 
                 if (i % 10 == 0) {
+                    CancelOrderCommand cancelOrderCommand = new CancelOrderCommand(i - 1, 0L, System.nanoTime());
                     event.setEventType(DisruptorEventType.CANCEL_ORDER);
-                    event.setCancelOrderId(i - 1);
+                    event.setCancelOrderCommand(cancelOrderCommand);
                     commandPacket.put("type", "CANCEL_ORDER");
-                    commandPacket.put("data", i - 1);
+                    commandPacket.put("cancelOrderCommand", cancelOrderCommand);
                 } else {
                     OrderSide side = (i % 2 == 0) ? OrderSide.BUY : OrderSide.SELL;
                     Order order = new Order(i, 1001L, side, 60000 + (i % 100), 10L);
+                    PlaceOrderCommand placeOrderCommand = new PlaceOrderCommand(
+                            order.getOrderId(),
+                            order.getUserId(),
+                            order.getSymbol(),
+                            order.getSide(),
+                            order.getPrice(),
+                            order.getRemainingAmount(),
+                            order.getTimestamp());
                     event.setEventType(DisruptorEventType.PLACE_ORDER);
-                    event.setOrder(order);
+                    event.setPlaceOrderCommand(placeOrderCommand);
                     commandPacket.put("type", "PLACE_ORDER");
-                    commandPacket.put("data", order);
+                    commandPacket.put("placeOrderCommand", placeOrderCommand);
                 }
                 MockKafkaBroker.send(commandPacket);
             } finally {
@@ -103,9 +115,7 @@ public class OmniMatchPerfTest {
 
                     // [ZH] 将快照标记同步写入 WAL 日志，用于日后的断点续传
                     // [EN] Synchronously write snapshot marker to WAL for future breakpoint continuation
-                    Map<String, Object> snapPacket = new HashMap<>();
-                    snapPacket.put("type", "MAKE_SNAPSHOT");
-                    MockKafkaBroker.send(snapPacket);
+                    MockKafkaBroker.send(CommandJournalEntry.forSnapshot(snapSeq));
                 } finally {
                     ringBuffer.publish(snapSeq);
                 }

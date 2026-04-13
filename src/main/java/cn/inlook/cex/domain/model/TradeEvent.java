@@ -5,8 +5,9 @@ import lombok.Getter;
 // [ZH] 撮合核心输出的结构化成交结果
 // [EN] Structured execution result emitted by the matching core
 @Getter
-public class TradeEvent {
+public class TradeEvent implements EngineEvent {
 
+    private final String symbol;
     private final long makerOrderId;
     private final long takerOrderId;
     private final long buyerId;
@@ -17,6 +18,7 @@ public class TradeEvent {
     private final long takerRemainingQty;
     private final OrderStatus makerStatus;
     private final OrderStatus takerStatus;
+    private final long timestamp;
 
     public TradeEvent(long makerOrderId,
                       long takerOrderId,
@@ -28,6 +30,33 @@ public class TradeEvent {
                       long takerRemainingQty,
                       OrderStatus makerStatus,
                       OrderStatus takerStatus) {
+        this(Order.DEFAULT_SYMBOL,
+                makerOrderId,
+                takerOrderId,
+                buyerId,
+                sellerId,
+                price,
+                quantity,
+                makerRemainingQty,
+                takerRemainingQty,
+                makerStatus,
+                takerStatus,
+                System.nanoTime());
+    }
+
+    public TradeEvent(String symbol,
+                      long makerOrderId,
+                      long takerOrderId,
+                      long buyerId,
+                      long sellerId,
+                      long price,
+                      long quantity,
+                      long makerRemainingQty,
+                      long takerRemainingQty,
+                      OrderStatus makerStatus,
+                      OrderStatus takerStatus,
+                      long timestamp) {
+        this.symbol = symbol;
         this.makerOrderId = makerOrderId;
         this.takerOrderId = takerOrderId;
         this.buyerId = buyerId;
@@ -38,5 +67,11 @@ public class TradeEvent {
         this.takerRemainingQty = takerRemainingQty;
         this.makerStatus = makerStatus;
         this.takerStatus = takerStatus;
+        this.timestamp = timestamp;
+    }
+
+    @Override
+    public EngineEventType getEventType() {
+        return EngineEventType.TRADE;
     }
 }

@@ -5,7 +5,7 @@ import lombok.Getter;
 // [ZH] 撤单成功后的结构化事件
 // [EN] Structured event emitted when an order is canceled
 @Getter
-public class OrderCanceledEvent {
+public class OrderCanceledEvent implements EngineEvent {
 
     private final String symbol;
     private final long orderId;
@@ -23,5 +23,10 @@ public class OrderCanceledEvent {
         this.userId = userId;
         this.remainingQuantity = remainingQuantity;
         this.timestamp = timestamp;
+    }
+
+    @Override
+    public EngineEventType getEventType() {
+        return EngineEventType.ORDER_CANCELED;
     }
 }
