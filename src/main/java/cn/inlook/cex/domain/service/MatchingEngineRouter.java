@@ -7,7 +7,9 @@ import cn.inlook.cex.domain.model.Order;
 import cn.inlook.cex.domain.model.OrderSide;
 import cn.inlook.cex.domain.model.PlaceOrderCommand;
 
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 // [ZH] 单机多交易对路由器：同一 symbol 路由到同一个撮合实例
@@ -21,6 +23,21 @@ public class MatchingEngineRouter {
     private final EngineEventPublisher engineEventPublisher;
     private final boolean enableInvariantCheck;
     private final Map<String, MatchingEngine> engines = new ConcurrentHashMap<>();
+
+    public MatchingEngineRouter(AccountService accountService, EngineEventPublisher engineEventPublisher) {
+        this(accountService, engineEventPublisher, false);
+    }
+
+    public MatchingEngineRouter(AccountService accountService,
+                                EngineEventPublisher engineEventPublisher,
+                                boolean enableInvariantCheck) {
+        this.accountService = accountService;
+        this.tradeEventPublisher = new NoopTradeEventPublisher();
+        this.orderCanceledEventPublisher = new NoopOrderCanceledEventPublisher();
+        this.orderRejectedEventPublisher = new NoopOrderRejectedEventPublisher();
+        this.engineEventPublisher = engineEventPublisher;
+        this.enableInvariantCheck = enableInvariantCheck;
+    }
 
     public MatchingEngineRouter(AccountService accountService, TradeEventPublisher tradeEventPublisher) {
         this(accountService,
@@ -102,6 +119,14 @@ public class MatchingEngineRouter {
         return engines.get(requiredSymbol(symbol));
     }
 
+    public int getRegisteredEngineCount() {
+        return engines.size();
+    }
+
+    public Set<String> getRegisteredSymbols() {
+        return Set.copyOf(engines.keySet());
+    }
+
     public Long getBestBidPrice(String symbol) {
         MatchingEngine engine = engines.get(requiredSymbol(symbol));
         return engine == null ? null : engine.getBestBidPrice();
@@ -124,7 +149,20 @@ public class MatchingEngineRouter {
 
     public java.util.List<Long> getOrderIdsAtPrice(String symbol, OrderSide side, long price) {
         MatchingEngine engine = engines.get(requiredSymbol(symbol));
-        return engine == null ? java.util.List.of() : engine.getOrderIdsAtPrice(side, price);
+        return engine == null ? List.of() : engine.getOrderIdsAtPrice(side, price);
+    }
+
+    public void assertInvariant(String symbol) {
+        MatchingEngine engine = engines.get(requiredSymbol(symbol));
+        if (engine != null) {
+            engine.assertInvariant();
+        }
+    }
+
+    public void assertInvariantAll() {
+        for (MatchingEngine engine : engines.values()) {
+            engine.assertInvariant();
+        }
     }
 
     private MatchingEngine resolveEngine(String symbol) {

@@ -17,11 +17,13 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class MatchingEngineRouterTest {
@@ -42,6 +44,8 @@ class MatchingEngineRouterTest {
         assertNotNull(btcEngine);
         assertNotNull(ethEngine);
         assertNotSame(btcEngine, ethEngine);
+        assertEquals(2, router.getRegisteredEngineCount());
+        assertEquals(Set.of("BTC-USDT", "ETH-USDT"), router.getRegisteredSymbols());
         assertEquals(List.of(1L), router.getOrderIdsAtPrice("BTC-USDT", OrderSide.BUY, 100L));
         assertEquals(List.of(2L), router.getOrderIdsAtPrice("ETH-USDT", OrderSide.BUY, 200L));
         assertEquals(List.of(), router.getOrderIdsAtPrice("BTC-USDT", OrderSide.BUY, 200L));
@@ -138,6 +142,51 @@ class MatchingEngineRouterTest {
         assertEquals(5L, event.getRemainingQuantity());
         assertEquals(14L, event.getTimestamp());
         assertTrue(rejectedPublisher.events.isEmpty());
+    }
+
+    @Test
+    void shouldMatchOnlyWithinSameSymbolAndPublishCorrectEventSymbol() {
+        RecordingTradeEventPublisher tradePublisher = new RecordingTradeEventPublisher();
+        MatchingEngineRouter router = new MatchingEngineRouter(
+                new RecordingAccountService(),
+                tradePublisher
+        );
+
+        router.handle(new PlaceOrderCommand(1L, 101L, "BTC-USDT", OrderSide.SELL, 100L, 5L, 11L));
+        router.handle(new PlaceOrderCommand(2L, 102L, "ETH-USDT", OrderSide.SELL, 100L, 5L, 12L));
+        router.handle(new PlaceOrderCommand(3L, 103L, "BTC-USDT", OrderSide.BUY, 100L, 5L, 13L));
+
+        assertFalse(router.hasActiveOrder("BTC-USDT", 1L));
+        assertFalse(router.hasActiveOrder("BTC-USDT", 3L));
+        assertTrue(router.hasActiveOrder("ETH-USDT", 2L));
+        assertNull(router.getBestBidPrice("BTC-USDT"));
+        assertNull(router.getBestAskPrice("BTC-USDT"));
+        assertEquals(100L, router.getBestAskPrice("ETH-USDT"));
+        assertEquals(1, tradePublisher.tradeEvents.size());
+        assertEquals("BTC-USDT", tradePublisher.tradeEvents.get(0).getSymbol());
+        router.assertInvariantAll();
+    }
+
+    @Test
+    void shouldKeepPerSymbolInvariantAcrossMatchAndCancel() {
+        MatchingEngineRouter router = new MatchingEngineRouter(
+                new RecordingAccountService(),
+                new RecordingTradeEventPublisher(),
+                true
+        );
+
+        router.handle(new PlaceOrderCommand(1L, 101L, "BTC-USDT", OrderSide.BUY, 101L, 5L, 11L));
+        router.handle(new PlaceOrderCommand(2L, 102L, "BTC-USDT", OrderSide.BUY, 100L, 5L, 12L));
+        router.handle(new PlaceOrderCommand(3L, 201L, "ETH-USDT", OrderSide.SELL, 205L, 5L, 13L));
+        router.handle(new PlaceOrderCommand(4L, 202L, "BTC-USDT", OrderSide.SELL, 101L, 5L, 14L));
+        router.handle(new CancelOrderCommand("BTC-USDT", 2L, 102L, 15L));
+
+        assertFalse(router.hasActiveOrder("BTC-USDT", 2L));
+        assertTrue(router.hasActiveOrder("ETH-USDT", 3L));
+        assertEquals(205L, router.getBestAskPrice("ETH-USDT"));
+        assertNull(router.getBestBidPrice("BTC-USDT"));
+        router.assertInvariant("BTC-USDT");
+        router.assertInvariant("ETH-USDT");
     }
 
     private static class RecordingAccountService implements AccountService {

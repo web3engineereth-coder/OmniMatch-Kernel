@@ -1,6 +1,7 @@
 package cn.inlook.cex.domain.service;
 
 import cn.inlook.cex.domain.model.CancelOrderCommand;
+import cn.inlook.cex.domain.model.BookLevelView;
 import cn.inlook.cex.domain.model.EngineEvent;
 import cn.inlook.cex.domain.model.Order;
 import cn.inlook.cex.domain.model.OrderBook;
@@ -44,6 +45,8 @@ public class MatchingEngine {
     // [ZH] 全局订单节点索引，用于 O(1) 撤单
     // [EN] Global order-node index for O(1) cancellation
     private Map<Long, OrderNode> orderMap = new HashMap<>();
+    private Map<Long, Order> terminalOrders = new HashMap<>();
+    private Map<Long, OrderRejectReason> terminalRejectReasons = new HashMap<>();
 
     private final int baseCurrency = 1;
     private final int quoteCurrency = 2;
@@ -147,6 +150,9 @@ public class MatchingEngine {
 
     public void processOrder(Order incomingOrder) {
         if (!accountService.reserveForOrder(incomingOrder)) {
+            incomingOrder.setStatus(OrderStatus.REJECTED);
+            archiveTerminalOrder(incomingOrder);
+            archiveRejectReason(incomingOrder.getOrderId(), OrderRejectReason.INSUFFICIENT_BALANCE);
             log.warn("Order {} rejected by account boundary.", incomingOrder.getOrderId());
             publishRejectedEvent(
                     incomingOrder.getSymbol(),
@@ -166,6 +172,8 @@ public class MatchingEngine {
 
         if (!incomingOrder.isFilled() && !incomingOrder.isCanceled()) {
             addLimitOrder(incomingOrder);
+        } else {
+            archiveTerminalOrder(incomingOrder);
         }
 
         runInvariantCheckIfEnabled();
@@ -198,6 +206,7 @@ public class MatchingEngine {
                 publishEngineEvent(tradeEvent);
 
                 if (makerNode.isFilled()) {
+                    archiveTerminalOrder(makerNode.getOrder());
                     makerBook.removeNode(makerNode);
                     orderMap.remove(makerNode.getOrderId());
                 }
@@ -264,6 +273,7 @@ public class MatchingEngine {
         accountService.releaseOnCancel(order);
         node.cancel();
         book.removeNode(node);
+        archiveTerminalOrder(order);
         publishEngineEvent(new OrderCanceledEvent(
                 order.getSymbol(),
                 order.getOrderId(),
@@ -297,6 +307,8 @@ public class MatchingEngine {
         this.bids = new OrderBook(OrderSide.BUY);
         this.asks = new OrderBook(OrderSide.SELL);
         this.orderMap = new HashMap<>();
+        this.terminalOrders = new HashMap<>();
+        this.terminalRejectReasons = new HashMap<>();
 
         for (Order order : snapshotOrders.values()) {
             if (order.getStatus() == null) {
@@ -327,12 +339,38 @@ public class MatchingEngine {
         return node == null ? null : node.getOrder();
     }
 
+    public Order findOrder(long orderId) {
+        Order activeOrder = findActiveOrder(orderId);
+        if (activeOrder != null) {
+            return activeOrder;
+        }
+        return terminalOrders.get(orderId);
+    }
+
+    public OrderRejectReason findRejectReason(long orderId) {
+        return terminalRejectReasons.get(orderId);
+    }
+
     public boolean hasActiveOrder(long orderId) {
         return orderMap.containsKey(orderId);
     }
 
     public List<Long> getOrderIdsAtPrice(OrderSide side, long price) {
         return getBook(side).getOrderIdsAtPrice(price);
+    }
+
+    public List<BookLevelView> snapshotLevels(OrderSide side) {
+        List<BookLevelView> levels = new ArrayList<>();
+        for (PriceLevel level : getBook(side).getLevels()) {
+            long totalRemainingQty = 0L;
+            OrderNode current = level.getHead();
+            while (current != null) {
+                totalRemainingQty += current.getRemainingQty();
+                current = current.getNext();
+            }
+            levels.add(new BookLevelView(level.getPrice(), level.getSize(), totalRemainingQty));
+        }
+        return levels;
     }
 
     public int getActiveOrderCount() {
@@ -466,6 +504,16 @@ public class MatchingEngine {
                                       OrderRejectReason reason,
                                       long timestamp) {
         publishEngineEvent(new OrderRejectedEvent(symbol, orderId, userId, reason, timestamp));
+    }
+
+    private void archiveTerminalOrder(Order order) {
+        terminalOrders.put(order.getOrderId(), order);
+    }
+
+    private void archiveRejectReason(long orderId, OrderRejectReason reason) {
+        if (reason != null) {
+            terminalRejectReasons.put(orderId, reason);
+        }
     }
 
     private void publishEngineEvent(EngineEvent event) {
